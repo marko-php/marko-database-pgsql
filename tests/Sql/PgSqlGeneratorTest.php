@@ -61,6 +61,19 @@ describe('PgSqlGenerator', function (): void {
         expect($sql)->toBe('ALTER TABLE "users" ADD COLUMN "bio" TEXT');
     });
 
+    it('keeps the primary key when adding the column through ALTER', function (): void {
+        $column = new Column(
+            name: 'id',
+            type: 'integer',
+            primaryKey: true,
+            autoIncrement: true,
+        );
+
+        $sql = $this->generator->generateAddColumn('role_permissions', $column);
+
+        expect($sql)->toBe('ALTER TABLE "role_permissions" ADD COLUMN "id" SERIAL PRIMARY KEY');
+    });
+
     it('generates ALTER TABLE DROP COLUMN', function (): void {
         $sql = $this->generator->generateDropColumn('users', 'bio');
 
