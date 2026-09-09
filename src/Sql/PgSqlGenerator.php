@@ -130,7 +130,7 @@ class PgSqlGenerator implements SqlGeneratorInterface
         string $table,
         Column $column,
     ): string {
-        $definition = $this->generateColumnDefinition($column, forAlter: true);
+        $definition = $this->generateColumnDefinition($column);
 
         return "ALTER TABLE \"$table\" ADD COLUMN $definition";
     }
@@ -236,11 +236,9 @@ class PgSqlGenerator implements SqlGeneratorInterface
      * Generate column definition SQL.
      *
      * @param Column $column The column to generate SQL for
-     * @param bool $forAlter Whether this is for an ALTER TABLE statement
      */
     private function generateColumnDefinition(
         Column $column,
-        bool $forAlter = false,
     ): string {
         $parts = ["\"$column->name\""];
 
@@ -266,8 +264,8 @@ class PgSqlGenerator implements SqlGeneratorInterface
             $parts[] = 'UNIQUE';
         }
 
-        // PRIMARY KEY (only in CREATE TABLE context, not ALTER)
-        if ($column->primaryKey && !$forAlter) {
+        // PRIMARY KEY
+        if ($column->primaryKey) {
             $parts[] = 'PRIMARY KEY';
         }
 
