@@ -184,11 +184,11 @@ describe('PostgreSQL row locks', function (): void {
         pgsqlInsertItem($this->connection, 1, 'first');
 
         $this->connection->beginTransaction();
-        new PgSqlQueryBuilder($this->connection)->table('primitives_items')->where(
-            'id',
-            '=',
-            1
-        )->lockForUpdate()->get();
+        new PgSqlQueryBuilder($this->connection)
+            ->table('primitives_items')
+            ->where('id', '=', 1)
+            ->lockForUpdate()
+            ->get();
 
         $contend = fn () => $this->contender->transaction(
             fn (): array => new PgSqlQueryBuilder($this->contender)
@@ -211,9 +211,11 @@ describe('PostgreSQL row locks', function (): void {
         new PgSqlQueryBuilder($this->connection)->table('primitives_items')->sharedLock()->get();
 
         $shared = $this->contender->transaction(
-            fn (): array => new PgSqlQueryBuilder($this->contender)->table(
-                'primitives_items'
-            )->sharedLock()->noWait()->get(),
+            fn (): array => new PgSqlQueryBuilder($this->contender)
+                ->table('primitives_items')
+                ->sharedLock()
+                ->noWait()
+                ->get(),
         );
         $this->connection->rollback();
 
