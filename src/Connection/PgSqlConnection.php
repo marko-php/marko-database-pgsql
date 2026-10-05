@@ -10,6 +10,7 @@ use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
+use Marko\Database\Exceptions\QueryException;
 use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\PgSql\Exceptions\ConnectionException;
 use Override;
@@ -25,6 +26,7 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Rese
     public function __construct(
         private readonly DatabaseConfig $config,
         private readonly string $charset = 'utf8',
+        private readonly PgSqlExceptionTranslator $exceptionTranslator = new PgSqlExceptionTranslator(),
     ) {}
 
     public function getDsn(): string
@@ -137,7 +139,7 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Rese
     }
 
     /**
-     * @throws ConnectionException
+     * @throws ConnectionException|QueryException
      */
     public function query(
         string $sql,
@@ -145,15 +147,19 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Rese
     ): array {
         $this->ensureConnected();
 
-        $statement = $this->pdo->prepare($sql);
-        $this->bindValues($statement, $bindings);
-        $statement->execute();
+        try {
+            $statement = $this->pdo->prepare($sql);
+            $this->bindValues($statement, $bindings);
+            $statement->execute();
+        } catch (PDOException $e) {
+            throw $this->exceptionTranslator->translate($e, $sql, $bindings);
+        }
 
         return $statement->fetchAll(PDO::FETCH_ASSOC);
     }
 
     /**
-     * @throws ConnectionException
+     * @throws ConnectionException|QueryException
      */
     public function execute(
         string $sql,
@@ -161,24 +167,32 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Rese
     ): int {
         $this->ensureConnected();
 
-        $statement = $this->pdo->prepare($sql);
-        $this->bindValues($statement, $bindings);
-        $statement->execute();
+        try {
+            $statement = $this->pdo->prepare($sql);
+            $this->bindValues($statement, $bindings);
+            $statement->execute();
+        } catch (PDOException $e) {
+            throw $this->exceptionTranslator->translate($e, $sql, $bindings);
+        }
 
         return $statement->rowCount();
     }
 
     /**
-     * @throws ConnectionException
+     * @throws ConnectionException|QueryException
      */
     public function prepare(
         string $sql,
     ): StatementInterface {
         $this->ensureConnected();
 
-        $pdoStatement = $this->pdo->prepare($sql);
+        try {
+            $pdoStatement = $this->pdo->prepare($sql);
+        } catch (PDOException $e) {
+            throw $this->exceptionTranslator->translate($e, $sql, []);
+        }
 
-        return new PgSqlStatement($pdoStatement);
+        return new PgSqlStatement($pdoStatement, $this->exceptionTranslator);
     }
 
     /**
