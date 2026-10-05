@@ -189,7 +189,9 @@ class PgSqlGenerator implements SqlGeneratorInterface
         $columns = $this->quoteIdentifiers($index->columns);
         $columnsSql = implode(', ', $columns);
 
-        return "CREATE {$unique}INDEX \"$index->name\" ON \"$table\" ($columnsSql)";
+        $whereSql = $index->where !== null ? " WHERE $index->where" : '';
+
+        return "CREATE {$unique}INDEX \"$index->name\" ON \"$table\" ($columnsSql)$whereSql";
     }
 
     public function generateDropIndex(

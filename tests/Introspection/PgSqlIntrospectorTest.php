@@ -9,6 +9,7 @@ use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Diff\DiffCalculator;
 use Marko\Database\Introspection\IntrospectorInterface;
 use Marko\Database\PgSql\Introspection\PgSqlIntrospector;
+use Marko\Database\PgSql\Sql\PgSqlGenerator;
 use Marko\Database\Schema\Column;
 use Marko\Database\Schema\ForeignKey;
 use Marko\Database\Schema\Index;
@@ -333,6 +334,105 @@ describe('PgSqlIntrospector', function (): void {
 
         expect($indexes[0]->type)->toBe(IndexType::Unique)
             ->and($indexes[1]->type)->toBe(IndexType::Btree);
+    });
+
+    it('reads the WHERE predicate of a partial index', function (): void {
+        $connection = createTestConnection(function (string $sql): array {
+            if (str_contains($sql, 'pg_indexes')) {
+                return [
+                    [
+                        'indexname' => 'shows_live_idx',
+                        'indexdef' => "CREATE INDEX shows_live_idx ON public.shows USING btree (status) WHERE ((status)::text = 'live'::text)",
+                    ],
+                    ['indexname' => 'shows_name_idx', 'indexdef' => 'CREATE INDEX shows_name_idx ON public.shows USING btree (name)'],
+                ];
+            }
+
+            return [];
+        });
+
+        $indexes = new PgSqlIntrospector($connection)->getIndexes('shows');
+
+        expect($indexes[0]->where)->toBe("(status)::text = 'live'::text")
+            ->and($indexes[1]->where)->toBeNull();
+    });
+
+    it('keeps parentheses that do not wrap the whole predicate', function (): void {
+        $connection = createTestConnection(function (string $sql): array {
+            if (str_contains($sql, 'pg_indexes')) {
+                return [
+                    [
+                        'indexname' => 'shows_flagged_idx',
+                        'indexdef' => 'CREATE INDEX shows_flagged_idx ON public.shows USING btree (status) WHERE (a = 1) OR (b = 2)',
+                    ],
+                ];
+            }
+
+            return [];
+        });
+
+        $indexes = new PgSqlIntrospector($connection)->getIndexes('shows');
+
+        expect($indexes[0]->where)->toBe('(a = 1) OR (b = 2)');
+    });
+
+    it('parses columns of a partial index without the predicate', function (): void {
+        $connection = createTestConnection(function (string $sql): array {
+            if (str_contains($sql, 'pg_indexes')) {
+                return [
+                    [
+                        'indexname' => 'shows_live_idx',
+                        'indexdef' => 'CREATE UNIQUE INDEX shows_live_idx ON public.shows USING btree (slug, status) WHERE (deleted_at IS NULL)',
+                    ],
+                ];
+            }
+
+            return [];
+        });
+
+        $indexes = new PgSqlIntrospector($connection)->getIndexes('shows');
+
+        expect($indexes[0]->columns)->toBe(['slug', 'status'])
+            ->and($indexes[0]->type)->toBe(IndexType::Unique)
+            ->and($indexes[0]->where)->toBe('deleted_at IS NULL');
+    });
+
+    it('produces an empty diff when the partial index already exists', function (): void {
+        $entityIndex = new Index(name: 'shows_live_idx', columns: ['status'], where: "status = 'live'");
+        $entitySchema = [
+            'shows' => new Table(
+                name: 'shows',
+                columns: [new Column(name: 'status', type: 'varchar', length: 20)],
+                indexes: [$entityIndex],
+            ),
+        ];
+        $generatedSql = new PgSqlGenerator()->generateAddIndex('shows', $entityIndex);
+
+        $connection = createTestConnection(function (string $sql): array {
+            if (str_contains($sql, 'information_schema.columns')) {
+                return [
+                    ['column_name' => 'status', 'data_type' => 'character varying', 'character_maximum_length' => 20, 'is_nullable' => 'NO', 'column_default' => null, 'is_identity' => 'NO', 'identity_generation' => null],
+                ];
+            }
+
+            if (str_contains($sql, 'pg_indexes')) {
+                return [
+                    [
+                        'indexname' => 'shows_live_idx',
+                        'indexdef' => "CREATE INDEX shows_live_idx ON public.shows USING btree (status) WHERE ((status)::text = 'live'::text)",
+                    ],
+                ];
+            }
+
+            return [];
+        });
+        $databaseSchema = ['shows' => new PgSqlIntrospector($connection)->getTable('shows')];
+
+        $diff = new DiffCalculator()->calculate($entitySchema, $databaseSchema);
+
+        expect($generatedSql)->toContain("WHERE status = 'live'")
+            ->and($databaseSchema['shows']->indexes[0]->where)->not->toBeNull()
+            ->and($diff->isEmpty())->toBeTrue();
     });
 
     it('reads foreign keys from information_schema.table_constraints', function (): void {

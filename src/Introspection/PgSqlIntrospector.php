@@ -199,6 +199,7 @@ readonly class PgSqlIntrospector implements IntrospectorInterface
                 name: $name,
                 columns: $columns,
                 type: $isUnique ? IndexType::Unique : IndexType::Btree,
+                where: $this->parseIndexPredicate($indexDef),
             );
         }
 
@@ -413,6 +414,52 @@ readonly class PgSqlIntrospector implements IntrospectorInterface
      *
      * @return array<string>
      */
+    /**
+     * Extract the predicate of a partial index from its definition, without the
+     * outer parentheses PostgreSQL adds, or null for a full index.
+     */
+    private function parseIndexPredicate(
+        string $indexDef,
+    ): ?string {
+        if (!preg_match('/\)\s+WHERE\s+(.+)$/is', $indexDef, $matches)) {
+            return null;
+        }
+
+        $predicate = trim($matches[1]);
+
+        return $this->isWrappedInOneParenthesisPair($predicate) ? substr($predicate, 1, -1) : $predicate;
+    }
+
+    /**
+     * Whether the opening parenthesis at position 0 closes at the last character.
+     */
+    private function isWrappedInOneParenthesisPair(
+        string $expression,
+    ): bool {
+        if (!str_starts_with($expression, '(')) {
+            return false;
+        }
+
+        $depth = 0;
+        $length = strlen($expression);
+
+        for ($position = 0; $position < $length; $position++) {
+            $character = $expression[$position];
+
+            if ($character === '(') {
+                $depth++;
+            } elseif ($character === ')') {
+                $depth--;
+
+                if ($depth === 0) {
+                    return $position === $length - 1;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private function parseIndexColumns(
         string $indexDef,
     ): array {

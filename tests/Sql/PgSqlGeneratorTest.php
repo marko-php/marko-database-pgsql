@@ -89,6 +89,39 @@ describe('PgSqlGenerator', function (): void {
         expect($sql)->toBe('CREATE INDEX "idx_users_email" ON "users" ("email")');
     });
 
+    it('generates a partial index with a WHERE clause', function (): void {
+        $index = new Index(
+            name: 'shows_live_idx',
+            columns: ['status'],
+            where: "status = 'live'",
+        );
+
+        $sql = $this->generator->generateAddIndex('shows', $index);
+
+        expect($sql)->toBe('CREATE INDEX "shows_live_idx" ON "shows" ("status") WHERE status = \'live\'');
+    });
+
+    it('recreates a dropped partial index with its WHERE clause in the down migration', function (): void {
+        $diff = new SchemaDiff(
+            tablesToAlter: [
+                'shows' => new TableDiff(
+                    tableName: 'shows',
+                    indexesToDrop: [
+                        new Index(name: 'shows_live_idx', columns: ['status'], where: "(status)::text = 'live'::text"),
+                    ],
+                ),
+            ],
+        );
+
+        $up = $this->generator->generateUp($diff);
+        $down = $this->generator->generateDown($diff);
+
+        expect($up)->toContain('DROP INDEX "shows_live_idx"')
+            ->and($down)->toContain(
+                'CREATE INDEX "shows_live_idx" ON "shows" ("status") WHERE (status)::text = \'live\'::text',
+            );
+    });
+
     it('generates DROP INDEX statements', function (): void {
         $sql = $this->generator->generateDropIndex('users', 'idx_users_email');
 
