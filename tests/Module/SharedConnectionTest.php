@@ -62,13 +62,17 @@ describe('PostgreSQL shared connection wiring', function (): void {
                 return false;
             }
 
-            public function query(string $sql, array $bindings = []): array
-            {
+            public function query(
+                string $sql,
+                array $bindings = [],
+            ): array {
                 return [];
             }
 
-            public function execute(string $sql, array $bindings = []): int
-            {
+            public function execute(
+                string $sql,
+                array $bindings = [],
+            ): int {
                 return 0;
             }
 

@@ -54,7 +54,9 @@ beforeEach(function (): void {
     $this->observer = new PgSqlConnection($config);
     $this->observer->execute('DROP TABLE IF EXISTS shared_accounts, shared_audit_entries');
     $this->observer->execute('CREATE TABLE shared_accounts (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL)');
-    $this->observer->execute('CREATE TABLE shared_audit_entries (id SERIAL PRIMARY KEY, message VARCHAR(255) NOT NULL)');
+    $this->observer->execute(
+        'CREATE TABLE shared_audit_entries (id SERIAL PRIMARY KEY, message VARCHAR(255) NOT NULL)',
+    );
 });
 
 afterEach(function (): void {

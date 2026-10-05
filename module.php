@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-use Marko\Database\Connection\ConnectionFactoryInterface;
 use Marko\Core\Container\ContainerInterface;
+use Marko\Database\Connection\ConnectionFactoryInterface;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\TransactionInterface;
-use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\Diff\SqlGeneratorInterface;
+use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\Introspection\IntrospectorInterface;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use Marko\Database\PgSql\Connection\PgSqlConnectionFactory;
