@@ -9,7 +9,6 @@ use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
-use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use Marko\Database\PgSql\Exceptions\ConnectionException;
 use PDO;
@@ -664,26 +663,6 @@ describe('PgSqlConnection', function (): void {
         $connection = new PgSqlConnection($config);
 
         expect($connection->getDsn())->not->toContain('sslkey');
-    });
-
-    it('prevents nested transactions (throws exception)', function (): void {
-        $config = createTestPgSqlConfig();
-        $connection = new class ($config) extends PgSqlConnection
-        {
-            protected function createPdo(
-                string $dsn,
-                string $username,
-                string $password,
-                array $options,
-            ): PDO {
-                return createSqliteMockPdo($options);
-            }
-        };
-
-        $connection->beginTransaction();
-
-        expect(fn () => $connection->beginTransaction())
-            ->toThrow(TransactionException::class, 'Nested transactions are not supported');
     });
 
     it('JSON-encodes array bindings instead of casting them to the string "Array"', function (): void {

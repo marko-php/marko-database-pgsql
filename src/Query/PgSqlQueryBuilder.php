@@ -5,12 +5,16 @@ declare(strict_types=1);
 namespace Marko\Database\PgSql\Query;
 
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\Exceptions\InvalidColumnException;
+use Marko\Database\Exceptions\LockException;
 use Marko\Database\Exceptions\UnionShapeMismatchException;
+use Marko\Database\Exceptions\UpsertException;
 use Marko\Database\PgSql\Exceptions\InsertReturningException;
 use Marko\Database\Query\IdentifierValidator;
 use Marko\Database\Query\JsonPathParser;
 use Marko\Database\Query\QueryBuilderInterface;
+use Marko\Database\Query\UpsertValidator;
 
 class PgSqlQueryBuilder implements QueryBuilderInterface
 {
@@ -101,6 +105,15 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
      * @var list<array{expression: string, bindings: array<int, mixed>}>
      */
     private array $rawWheres = [];
+
+    /**
+     * Row lock requested with lockForUpdate() ('update') or sharedLock() ('share').
+     */
+    private ?string $lockMode = null;
+
+    private bool $skipLocked = false;
+
+    private bool $noWait = false;
 
     public function __construct(
         private readonly ConnectionInterface $connection,
@@ -194,6 +207,8 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
     public function compileSubquery(
         array &$bindings,
     ): string {
+        $this->assertNotLocked('union()');
+
         $savedBindings = $this->bindings;
         $sql = $this->buildSelectSql();
         $bindings = array_merge($bindings, $this->bindings);
@@ -520,6 +535,8 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
     public function get(): array
     {
         if (!empty($this->unions)) {
+            $this->assertNotLocked('union()');
+
             return $this->executeUnion();
         }
 
@@ -631,6 +648,8 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
      */
     public function count(?string $column = null): int
     {
+        $this->assertNotLocked('count()');
+
         if ($column !== null) {
             IdentifierValidator::assertValidIdentifier($column);
         }
@@ -647,6 +666,8 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
      */
     public function min(string $column): int|float|null
     {
+        $this->assertNotLocked('min()');
+
         if (!IdentifierValidator::isValidIdentifier($column)) {
             throw InvalidColumnException::invalidColumn($column);
         }
@@ -659,6 +680,8 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
      */
     public function max(string $column): int|float|null
     {
+        $this->assertNotLocked('max()');
+
         if (!IdentifierValidator::isValidIdentifier($column)) {
             throw InvalidColumnException::invalidColumn($column);
         }
@@ -671,6 +694,8 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
      */
     public function sum(string $column): int|float|null
     {
+        $this->assertNotLocked('sum()');
+
         if (!IdentifierValidator::isValidIdentifier($column)) {
             throw InvalidColumnException::invalidColumn($column);
         }
@@ -683,6 +708,8 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
      */
     public function avg(string $column): int|float|null
     {
+        $this->assertNotLocked('avg()');
+
         if (!IdentifierValidator::isValidIdentifier($column)) {
             throw InvalidColumnException::invalidColumn($column);
         }
@@ -695,6 +722,66 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
         array $bindings = [],
     ): array {
         return $this->connection->query($sql, $bindings);
+    }
+
+    public function lockForUpdate(): static
+    {
+        $this->lockMode = 'update';
+
+        return $this;
+    }
+
+    public function sharedLock(): static
+    {
+        $this->lockMode = 'share';
+
+        return $this;
+    }
+
+    public function skipLocked(): static
+    {
+        $this->skipLocked = true;
+
+        return $this;
+    }
+
+    public function noWait(): static
+    {
+        $this->noWait = true;
+
+        return $this;
+    }
+
+    /**
+     * @throws InvalidColumnException|UpsertException
+     */
+    public function upsert(
+        array $rows,
+        array $uniqueBy,
+        ?array $update = null,
+    ): int {
+        $updateColumns = UpsertValidator::validate($rows, $uniqueBy, $update);
+        $rows = array_values($rows);
+        $columns = array_map('strval', array_keys($rows[0]));
+
+        $bindings = [];
+        foreach ($rows as $row) {
+            foreach ($row as $value) {
+                $bindings[] = $value;
+            }
+        }
+
+        $placeholderRow = '(' . implode(', ', array_fill(0, count($columns), '?')) . ')';
+
+        $sql = sprintf(
+            'INSERT INTO %s (%s) VALUES %s %s',
+            $this->quoteIdentifier($this->table),
+            implode(', ', array_map(fn (string $column): string => $this->quoteIdentifier($column), $columns)),
+            implode(', ', array_fill(0, count($rows), $placeholderRow)),
+            $this->buildUpsertConflictClause(array_values($uniqueBy), $updateColumns),
+        );
+
+        return $this->connection->execute($sql, $bindings);
     }
 
     protected function quoteIdentifier(
@@ -882,6 +969,7 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
         $sql .= $this->buildHavingClause();
         $sql .= $this->buildOrderByClause();
         $sql .= $this->buildLimitOffsetClause();
+        $sql .= $this->buildLockClause();
 
         return $sql;
     }
@@ -1095,5 +1183,102 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
         }
 
         return $clause;
+    }
+
+    /**
+     * @param list<string> $uniqueBy
+     * @param list<string> $updateColumns
+     */
+    private function buildUpsertConflictClause(
+        array $uniqueBy,
+        array $updateColumns,
+    ): string {
+        $conflict = sprintf(
+            'ON CONFLICT (%s)',
+            implode(', ', array_map(fn (string $column): string => $this->quoteIdentifier($column), $uniqueBy)),
+        );
+
+        if ($updateColumns === []) {
+            return "$conflict DO NOTHING";
+        }
+
+        $assignments = array_map(
+            fn (string $column): string => sprintf(
+                '%s = EXCLUDED.%s',
+                $this->quoteIdentifier($column),
+                $this->quoteIdentifier($column),
+            ),
+            $updateColumns,
+        );
+
+        return "$conflict DO UPDATE SET " . implode(', ', $assignments);
+    }
+
+    /**
+     * Compile the row-lock clause, appended after LIMIT/OFFSET.
+     *
+     * @throws LockException
+     */
+    private function buildLockClause(): string
+    {
+        $modifier = $this->buildLockModifier();
+
+        if ($this->lockMode === null) {
+            return '';
+        }
+
+        $this->assertLockInTransaction();
+
+        $clause = $this->lockMode === 'update' ? ' FOR UPDATE' : ' FOR SHARE';
+
+        return $clause . $modifier;
+    }
+
+    /**
+     * @throws LockException
+     */
+    private function buildLockModifier(): string
+    {
+        if ($this->skipLocked && $this->noWait) {
+            throw LockException::conflictingModifiers();
+        }
+
+        if ($this->lockMode === null && $this->skipLocked) {
+            throw LockException::modifierWithoutLock('skipLocked');
+        }
+
+        if ($this->lockMode === null && $this->noWait) {
+            throw LockException::modifierWithoutLock('noWait');
+        }
+
+        return match (true) {
+            $this->skipLocked => ' SKIP LOCKED',
+            $this->noWait => ' NOWAIT',
+            default => '',
+        };
+    }
+
+    /**
+     * A lock taken outside a transaction is released as soon as the SELECT
+     * finishes, which is almost always a bug.
+     *
+     * @throws LockException
+     */
+    private function assertLockInTransaction(): void
+    {
+        if (!$this->connection instanceof TransactionInterface || !$this->connection->inTransaction()) {
+            throw LockException::outsideTransaction($this->table);
+        }
+    }
+
+    /**
+     * @throws LockException
+     */
+    private function assertNotLocked(
+        string $operation,
+    ): void {
+        if ($this->lockMode !== null) {
+            throw LockException::unsupportedOperation($operation);
+        }
     }
 }

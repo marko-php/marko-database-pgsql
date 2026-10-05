@@ -10,6 +10,7 @@ use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
+use Marko\Database\Connection\TransactionState;
 use Marko\Database\Exceptions\QueryException;
 use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\PgSql\Exceptions\ConnectionException;
@@ -23,11 +24,15 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Rese
 {
     private ?PDO $pdo = null;
 
+    private TransactionState $transactionState;
+
     public function __construct(
         private readonly DatabaseConfig $config,
         private readonly string $charset = 'utf8',
         private readonly PgSqlExceptionTranslator $exceptionTranslator = new PgSqlExceptionTranslator(),
-    ) {}
+    ) {
+        $this->transactionState = new TransactionState();
+    }
 
     public function getDsn(): string
     {
@@ -118,8 +123,13 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Rese
         return "SET NAMES '$this->charset'";
     }
 
+    /**
+     * Dropping the connection ends any open transaction on the server, so the
+     * transaction depth and pending callbacks are discarded with it.
+     */
     public function disconnect(): void
     {
+        $this->transactionState->clear();
         $this->pdo = null;
     }
 
@@ -245,50 +255,116 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Rese
     }
 
     /**
-     * @throws TransactionException|ConnectionException
+     * Open a transaction, or a savepoint named marko_sp_{depth} when one is
+     * already open.
+     *
+     * @throws ConnectionException
      */
     public function beginTransaction(): void
     {
         $this->ensureConnected();
 
-        if ($this->pdo->inTransaction()) {
-            throw TransactionException::nestedTransactionNotSupported();
+        $level = $this->transactionState->level();
+
+        if ($level === 0) {
+            $this->pdo->beginTransaction();
+        } else {
+            $this->pdo->exec('SAVEPOINT ' . $this->savepointName($level));
         }
 
-        $this->pdo->beginTransaction();
+        $this->transactionState->begin();
     }
 
     /**
-     * @throws ConnectionException
+     * Commit the innermost level: COMMIT at the outermost level, RELEASE
+     * SAVEPOINT when nested. After-commit callbacks run once the outermost
+     * level commits.
+     *
+     * When the outermost COMMIT fails, the transaction is rolled back (if the
+     * server left it open), the after-rollback callbacks run, and the COMMIT
+     * error is rethrown.
+     *
+     * @throws ConnectionException|TransactionException|Throwable
      */
     public function commit(): void
     {
+        $level = $this->transactionState->level();
+
+        if ($level === 0) {
+            throw TransactionException::notInTransaction();
+        }
+
         $this->ensureConnected();
 
-        $this->pdo->commit();
+        try {
+            if ($level === 1) {
+                $this->pdo->commit();
+            } else {
+                $this->pdo->exec('RELEASE SAVEPOINT ' . $this->savepointName($level - 1));
+            }
+        } catch (Throwable $e) {
+            if ($level === 1) {
+                if ($this->pdo->inTransaction()) {
+                    $this->pdo->rollBack();
+                }
+
+                $this->transactionState->rollback();
+            } else {
+                $this->transactionState->discard();
+            }
+
+            throw $e;
+        }
+
+        $this->transactionState->commit();
     }
 
     /**
-     * @throws ConnectionException
+     * Roll back the innermost level: ROLLBACK at the outermost level,
+     * ROLLBACK TO SAVEPOINT when nested. The level's after-commit callbacks
+     * are discarded and its after-rollback callbacks run.
+     *
+     * @throws ConnectionException|TransactionException|Throwable
      */
     public function rollback(): void
     {
+        $level = $this->transactionState->level();
+
+        if ($level === 0) {
+            throw TransactionException::notInTransaction();
+        }
+
         $this->ensureConnected();
 
-        $this->pdo->rollBack();
+        try {
+            if ($level === 1) {
+                $this->pdo->rollBack();
+            } else {
+                $this->pdo->exec('ROLLBACK TO SAVEPOINT ' . $this->savepointName($level - 1));
+            }
+        } catch (Throwable $e) {
+            $this->transactionState->discard();
+
+            throw $e;
+        }
+
+        $this->transactionState->rollback();
     }
 
-    /**
-     * @throws ConnectionException
-     */
     public function inTransaction(): bool
     {
-        $this->ensureConnected();
+        return $this->transactionState->level() > 0;
+    }
 
-        return $this->pdo->inTransaction();
+    public function transactionLevel(): int
+    {
+        return $this->transactionState->level();
     }
 
     /**
+     * Commit happens outside the try so a failed COMMIT is never followed by
+     * a second rollback attempt (commit() already cleans up after itself).
+     *
      * @throws ConnectionException|Throwable|TransactionException
      */
     public function transaction(
@@ -298,28 +374,49 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Rese
 
         try {
             $result = $callback();
-
-            $this->commit();
-
-            return $result;
         } catch (Throwable $e) {
             $this->rollback();
 
             throw $e;
         }
+
+        $this->commit();
+
+        return $result;
+    }
+
+    public function afterCommit(
+        callable $callback,
+    ): void {
+        $this->transactionState->afterCommit($callback);
+    }
+
+    public function afterRollback(
+        callable $callback,
+    ): void {
+        $this->transactionState->afterRollback($callback);
     }
 
     /**
      * Rolls back a transaction abandoned by a request that threw before
      * commit()/rollback(), so a long-running worker never carries it into
-     * the next request. Never opens a connection: an unconnected instance
-     * has nothing to roll back.
+     * the next request. Pending callbacks are dropped without running: they
+     * belong to the abandoned request. Never opens a connection: an
+     * unconnected instance has nothing to roll back.
      */
     #[Override]
     public function reset(): void
     {
+        $this->transactionState->clear();
+
         if ($this->pdo !== null && $this->pdo->inTransaction()) {
             $this->pdo->rollBack();
         }
+    }
+
+    private function savepointName(
+        int $depth,
+    ): string {
+        return "marko_sp_$depth";
     }
 }
