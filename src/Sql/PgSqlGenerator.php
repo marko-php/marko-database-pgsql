@@ -158,10 +158,20 @@ class PgSqlGenerator implements SqlGeneratorInterface
             ?? throw MigrationException::nothingToModify($table, $column->name, 'PostgreSQL');
     }
 
+    /**
+     * A CREATE INDEX statement, or for an index that backs a unique constraint (restored by a down migration)
+     * the ALTER TABLE ... ADD CONSTRAINT that recreates the constraint.
+     */
     public function generateAddIndex(
         string $table,
         Index $index,
     ): string {
+        if ($index->constraint) {
+            $constraintColumns = implode(', ', $this->quoteIdentifiers($index->columns));
+
+            return "ALTER TABLE \"$table\" ADD CONSTRAINT \"$index->name\" UNIQUE ($constraintColumns)";
+        }
+
         $unique = $index->type === IndexType::Unique ? 'UNIQUE ' : '';
         $columns = $this->quoteIdentifiers($index->columns);
         $columnsSql = implode(', ', $columns);
@@ -365,7 +375,7 @@ class PgSqlGenerator implements SqlGeneratorInterface
 
         // Drop indexes
         foreach ($diff->indexesToDrop as $index) {
-            $statements[] = $this->generateDropIndex($diff->tableName, $index->name);
+            $statements[] = $this->dropIndexStatement($diff->tableName, $index);
         }
 
         // Add foreign keys
@@ -379,6 +389,19 @@ class PgSqlGenerator implements SqlGeneratorInterface
         }
 
         return $statements;
+    }
+
+    /**
+     * DROP INDEX, or DROP CONSTRAINT for an index that backs a unique constraint (PostgreSQL refuses to drop it
+     * as an index).
+     */
+    private function dropIndexStatement(
+        string $table,
+        Index $index,
+    ): string {
+        return $index->constraint
+            ? "ALTER TABLE \"$table\" DROP CONSTRAINT \"$index->name\""
+            : $this->generateDropIndex($table, $index->name);
     }
 
     /**

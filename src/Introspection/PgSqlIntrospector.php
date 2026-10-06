@@ -174,12 +174,24 @@ readonly class PgSqlIntrospector implements IntrospectorInterface
         // Primary keys are tracked as column flags, not as Index objects.
         $pkIndexNames = $this->getPrimaryKeyIndexNames($table);
 
+        // is_constraint: the index backs a UNIQUE constraint (inline UNIQUE), which only DROP CONSTRAINT removes
         $sql = <<<'SQL'
-            SELECT indexname, indexdef
-            FROM pg_indexes
-            WHERE tablename = ?
-              AND schemaname = ?
-            ORDER BY indexname
+            SELECT
+                i.indexname,
+                i.indexdef,
+                EXISTS (
+                    SELECT 1
+                    FROM pg_constraint con
+                    JOIN pg_class ic ON ic.oid = con.conindid
+                    JOIN pg_namespace n ON n.oid = ic.relnamespace
+                    WHERE con.contype = 'u'
+                      AND ic.relname = i.indexname
+                      AND n.nspname = i.schemaname
+                ) AS is_constraint
+            FROM pg_indexes i
+            WHERE i.tablename = ?
+              AND i.schemaname = ?
+            ORDER BY i.indexname
             SQL;
 
         $rows = $this->connection->query($sql, [$table, $this->schema]);
@@ -203,6 +215,7 @@ readonly class PgSqlIntrospector implements IntrospectorInterface
                 columns: $columns,
                 type: $isUnique ? IndexType::Unique : IndexType::Btree,
                 where: $this->parseIndexPredicate($indexDef),
+                constraint: in_array($row['is_constraint'] ?? false, [true, 't', 'true', '1', 1], true),
             );
         }
 

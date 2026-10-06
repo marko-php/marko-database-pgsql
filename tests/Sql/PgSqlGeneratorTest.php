@@ -849,6 +849,43 @@ describe('PgSqlGenerator', function (): void {
             "Column 'posts.status' is modified, but the diff holds no previous definition for it",
         );
     });
+    it('drops a unique constraint with DROP CONSTRAINT', function (): void {
+        $constraint = new Index(
+            name: 'users_email_key',
+            columns: ['email'],
+            type: IndexType::Unique,
+            constraint: true,
+        );
+        $diff = new SchemaDiff(
+            tablesToAlter: ['users' => new TableDiff(tableName: 'users', indexesToDrop: [$constraint])],
+        );
+
+        expect($this->generator->generateUp($diff))->toBe(['ALTER TABLE "users" DROP CONSTRAINT "users_email_key"']);
+    });
+
+    it('restores a dropped unique constraint with ADD CONSTRAINT in down', function (): void {
+        $constraint = new Index(
+            name: 'users_email_key',
+            columns: ['email'],
+            type: IndexType::Unique,
+            constraint: true,
+        );
+        $diff = new SchemaDiff(
+            tablesToAlter: ['users' => new TableDiff(tableName: 'users', indexesToDrop: [$constraint])],
+        );
+
+        expect($this->generator->generateDown($diff))
+            ->toBe(['ALTER TABLE "users" ADD CONSTRAINT "users_email_key" UNIQUE ("email")']);
+    });
+
+    it('adds a unique index for a column that becomes unique and drops it in down', function (): void {
+        $index = new Index(name: 'users_email_unique', columns: ['email'], type: IndexType::Unique);
+        $diff = new SchemaDiff(tablesToAlter: ['users' => new TableDiff(tableName: 'users', indexesToAdd: [$index])]);
+
+        expect($this->generator->generateUp($diff))
+            ->toBe(['CREATE UNIQUE INDEX "users_email_unique" ON "users" ("email")'])
+            ->and($this->generator->generateDown($diff))->toBe(['DROP INDEX "users_email_unique"']);
+    });
 });
 
 /**

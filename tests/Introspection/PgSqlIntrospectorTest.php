@@ -637,18 +637,18 @@ describe('PgSqlIntrospector', function (): void {
                 ];
             }
 
+            if (str_contains($sql, 'pg_indexes')) {
+                return [
+                    ['indexname' => 'users_name_idx', 'indexdef' => 'CREATE INDEX users_name_idx ON public.users USING btree (name)'],
+                ];
+            }
+
             if (str_contains($sql, 'pg_constraint') && str_contains($sql, "'p'")) {
                 return [['column_name' => 'id']];
             }
 
             if (str_contains($sql, 'pg_constraint') && str_contains($sql, "'u'")) {
                 return [];
-            }
-
-            if (str_contains($sql, 'pg_indexes')) {
-                return [
-                    ['indexname' => 'users_name_idx', 'indexdef' => 'CREATE INDEX users_name_idx ON public.users USING btree (name)'],
-                ];
             }
 
             return [];
@@ -742,6 +742,46 @@ describe('PgSqlIntrospector', function (): void {
 
         expect($columns[0]->primaryKey)->toBeTrue()
             ->and($columns[1]->primaryKey)->toBeFalse();
+    });
+    it('marks an index that backs a unique constraint as a constraint', function (): void {
+        $connection = createTestConnection(function (string $sql): array {
+            if (str_contains($sql, 'pg_indexes')) {
+                return [
+                    [
+                        'indexname' => 'users_email_key',
+                        'indexdef' => 'CREATE UNIQUE INDEX users_email_key ON public.users USING btree (email)',
+                        'is_constraint' => true,
+                    ],
+                    [
+                        'indexname' => 'users_name_unique',
+                        'indexdef' => 'CREATE UNIQUE INDEX users_name_unique ON public.users USING btree (name)',
+                        'is_constraint' => false,
+                    ],
+                ];
+            }
+
+            return [];
+        });
+
+        $indexes = new PgSqlIntrospector($connection)->getIndexes('users');
+
+        expect($indexes[0]->constraint)->toBeTrue()
+            ->and($indexes[1]->constraint)->toBeFalse();
+    });
+
+    it('asks pg_constraint which indexes back a unique constraint in the same query', function (): void {
+        $queries = [];
+        $connection = createTestConnection(function (string $sql) use (&$queries): array {
+            $queries[] = $sql;
+
+            return [];
+        });
+
+        new PgSqlIntrospector($connection)->getIndexes('users');
+        $indexQuery = array_find($queries, static fn (string $sql): bool => str_contains($sql, 'pg_indexes'));
+
+        expect($indexQuery)->toContain('pg_constraint')
+            ->and($indexQuery)->toContain("contype = 'u'");
     });
 });
 
