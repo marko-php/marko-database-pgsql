@@ -1225,6 +1225,127 @@ describe('PgSqlGenerator derived names over 63 bytes', function (): void {
     });
 });
 
+describe('PgSqlGenerator primary key columns on existing tables', function (): void {
+    beforeEach(function (): void {
+        $this->generator = new PgSqlGenerator();
+        $this->up = fn (TableDiff $tableDiff): array => $this->generator->generateUp(
+            new SchemaDiff(tablesToAlter: [$tableDiff->tableName => $tableDiff]),
+        );
+        $this->down = fn (TableDiff $tableDiff): array => $this->generator->generateDown(
+            new SchemaDiff(tablesToAlter: [$tableDiff->tableName => $tableDiff]),
+        );
+        $this->serialId = new Column(name: 'id', type: 'int', primaryKey: true, autoIncrement: true);
+    });
+
+    it('adds a serial primary key column and its key in one statement', function (): void {
+        $statements = ($this->up)(new TableDiff(tableName: 'admin_user_roles', columnsToAdd: [$this->serialId]));
+
+        expect($statements)->toBe(['ALTER TABLE "admin_user_roles" ADD COLUMN "id" SERIAL, ADD PRIMARY KEY ("id")']);
+    });
+
+    it('adds the key with a primary key column passed to generateAddColumn', function (): void {
+        expect($this->generator->generateAddColumn('admin_user_roles', $this->serialId))
+            ->toBe('ALTER TABLE "admin_user_roles" ADD COLUMN "id" SERIAL, ADD PRIMARY KEY ("id")');
+    });
+
+    it('adds every column of a composite primary key and the key in one statement', function (): void {
+        $statements = ($this->up)(new TableDiff(tableName: 'post_tags', columnsToAdd: [
+            new Column(name: 'post_id', type: 'int', primaryKey: true),
+            new Column(name: 'tag_id', type: 'int', primaryKey: true),
+        ]));
+
+        expect($statements)->toBe([
+            'ALTER TABLE "post_tags" ADD COLUMN "post_id" INTEGER, ADD COLUMN "tag_id" INTEGER, '
+            . 'ADD PRIMARY KEY ("post_id", "tag_id")',
+        ]);
+    });
+
+    it('adds a uuid primary key column with its default and key in one statement', function (): void {
+        $statements = ($this->up)(new TableDiff(tableName: 'tokens', columnsToAdd: [
+            new Column(name: 'id', type: 'uuid', default: new Expression('gen_random_uuid()'), primaryKey: true),
+        ]));
+
+        expect($statements)->toBe([
+            'ALTER TABLE "tokens" ADD COLUMN "id" UUID DEFAULT gen_random_uuid(), ADD PRIMARY KEY ("id")',
+        ]);
+    });
+
+    it('keeps added columns that are not part of the key in their own statements', function (): void {
+        $statements = ($this->up)(new TableDiff(tableName: 'posts', columnsToAdd: [
+            new Column(name: 'title', type: 'string', length: 100),
+            $this->serialId,
+        ]));
+
+        expect($statements)->toBe([
+            'ALTER TABLE "posts" ADD COLUMN "title" VARCHAR(100) NOT NULL',
+            'ALTER TABLE "posts" ADD COLUMN "id" SERIAL, ADD PRIMARY KEY ("id")',
+        ]);
+    });
+
+    it('throws when a primary key column is added to a table that already has a primary key', function (): void {
+        $tableDiff = new TableDiff(
+            tableName: 'post_tags',
+            columnsToAdd: [$this->serialId],
+            currentPrimaryKey: ['post_id', 'tag_id'],
+        );
+
+        expect(fn () => ($this->up)($tableDiff))->toThrow(
+            MigrationException::class,
+            "Cannot add primary key column 'id' to table 'post_tags', which already has a primary key on "
+            . "'post_id', 'tag_id'",
+        );
+    });
+
+    it('adds a column that is not a key to a table that has a primary key', function (): void {
+        $statements = ($this->up)(new TableDiff(
+            tableName: 'posts',
+            columnsToAdd: [new Column(name: 'body', type: 'text', nullable: true)],
+            currentPrimaryKey: ['id'],
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ADD COLUMN "body" TEXT']);
+    });
+
+    it('throws when a primary key column is added while the current key columns are dropped', function (): void {
+        $tableDiff = new TableDiff(
+            tableName: 'tokens',
+            columnsToAdd: [$this->serialId],
+            columnsToDrop: [new Column(name: 'code', type: 'string', primaryKey: true)],
+            currentPrimaryKey: ['code'],
+        );
+
+        expect(fn () => ($this->up)($tableDiff))->toThrow(
+            MigrationException::class,
+            "Cannot add primary key column 'id' to table 'tokens', which already has a primary key on 'code'",
+        );
+    });
+
+    it('throws when a diff drops part of a composite primary key', function (): void {
+        $tableDiff = new TableDiff(
+            tableName: 'post_tags',
+            columnsToDrop: [new Column(name: 'tag_id', type: 'int', primaryKey: true)],
+            currentPrimaryKey: ['post_id', 'tag_id'],
+        );
+
+        expect(fn () => ($this->up)($tableDiff))->toThrow(
+            MigrationException::class,
+            "Cannot change the primary key of column 'post_tags.tag_id' in place on PostgreSQL",
+        );
+    });
+
+    it('drops an added primary key column in down', function (): void {
+        $statements = ($this->down)(new TableDiff(tableName: 'admin_user_roles', columnsToAdd: [$this->serialId]));
+
+        expect($statements)->toBe(['ALTER TABLE "admin_user_roles" DROP COLUMN "id"']);
+    });
+
+    it('restores a dropped primary key column with its key in down', function (): void {
+        $statements = ($this->down)(new TableDiff(tableName: 'admin_user_roles', columnsToDrop: [$this->serialId]));
+
+        expect($statements)->toBe(['ALTER TABLE "admin_user_roles" ADD COLUMN "id" SERIAL, ADD PRIMARY KEY ("id")']);
+    });
+});
+
 /**
  * The diff that makes an existing column of a long-named table unique and a foreign key, so both derived names are
  * over 63 bytes before shortening.

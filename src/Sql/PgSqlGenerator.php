@@ -134,10 +134,17 @@ class PgSqlGenerator implements SqlGeneratorInterface
         return 'DROP TABLE ' . $this->quote($tableName);
     }
 
+    /**
+     * A primary key column is added together with its key (see generateAddKeyColumns()).
+     */
     public function generateAddColumn(
         string $table,
         Column $column,
     ): string {
+        if ($column->primaryKey) {
+            return $this->generateAddKeyColumns($table, [$column]);
+        }
+
         $definition = $this->generateColumnDefinition($column, forAlter: true);
 
         return 'ALTER TABLE ' . $this->quote($table) . " ADD COLUMN $definition";
@@ -360,12 +367,10 @@ class PgSqlGenerator implements SqlGeneratorInterface
     private function generateTableAlterations(
         TableDiff $diff,
     ): array {
-        $statements = [];
+        $diff->assertSupportedPrimaryKeyChange('PostgreSQL');
 
-        // Add columns
-        foreach ($diff->columnsToAdd as $column) {
-            $statements[] = $this->generateAddColumn($diff->tableName, $column);
-        }
+        // Add columns, primary key columns together with their key
+        $statements = $this->addColumnStatements($diff->tableName, $diff->columnsToAdd);
 
         // Drop columns
         foreach ($diff->columnsToDrop as $column) {
@@ -396,6 +401,54 @@ class PgSqlGenerator implements SqlGeneratorInterface
         }
 
         return $statements;
+    }
+
+    /**
+     * ADD COLUMN statements for $columns. The primary key columns and their ADD PRIMARY KEY share one ALTER
+     * TABLE, at the position of the first of them, so a failure never leaves a key column behind without its
+     * key.
+     *
+     * @param array<Column> $columns
+     * @return list<string>
+     */
+    private function addColumnStatements(
+        string $table,
+        array $columns,
+    ): array {
+        $statements = [];
+        $keyColumns = array_values(array_filter($columns, static fn (Column $column): bool => $column->primaryKey));
+
+        foreach ($columns as $column) {
+            if (!$column->primaryKey) {
+                $statements[] = $this->generateAddColumn($table, $column);
+            } elseif ($column === $keyColumns[0]) {
+                $statements[] = $this->generateAddKeyColumns($table, $keyColumns);
+            }
+        }
+
+        return $statements;
+    }
+
+    /**
+     * One ALTER TABLE adding the primary key columns and the key over them. ADD PRIMARY KEY makes the columns
+     * NOT NULL.
+     *
+     * @param non-empty-list<Column> $keyColumns
+     */
+    private function generateAddKeyColumns(
+        string $table,
+        array $keyColumns,
+    ): string {
+        $additions = array_map(
+            fn (Column $column): string => 'ADD COLUMN ' . $this->generateColumnDefinition($column, forAlter: true),
+            $keyColumns,
+        );
+        $keyNames = $this->quoteIdentifiers(
+            array_map(static fn (Column $column): string => $column->name, $keyColumns),
+        );
+        $additions[] = 'ADD PRIMARY KEY (' . implode(', ', $keyNames) . ')';
+
+        return 'ALTER TABLE ' . $this->quote($table) . ' ' . implode(', ', $additions);
     }
 
     /**
@@ -436,10 +489,8 @@ class PgSqlGenerator implements SqlGeneratorInterface
             $statements[] = $this->generateDropColumn($diff->tableName, $column->name);
         }
 
-        // Reverse: add dropped columns
-        foreach ($diff->columnsToDrop as $column) {
-            $statements[] = $this->generateAddColumn($diff->tableName, $column);
-        }
+        // Reverse: add dropped columns, primary key columns together with their key
+        $statements = [...$statements, ...$this->addColumnStatements($diff->tableName, $diff->columnsToDrop)];
 
         // Reverse: restore modified columns before the indexes and foreign keys that rely on them
         $statements = [...$statements, ...$this->generateColumnModifications($diff, reverse: true)];

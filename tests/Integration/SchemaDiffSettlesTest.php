@@ -11,6 +11,8 @@ use Marko\Database\Diff\SchemaDiff;
 use Marko\Database\Entity\Entity;
 use Marko\Database\Entity\EntityMetadataFactory;
 use Marko\Database\Entity\SchemaBuilder;
+use Marko\Database\Exceptions\MigrationException;
+use Marko\Database\Exceptions\QueryException;
 use Marko\Database\Exceptions\UniqueConstraintViolationException;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use Marko\Database\PgSql\Introspection\PgSqlIntrospector;
@@ -48,7 +50,14 @@ beforeEach(function (): void {
 
     $this->connection = new PgSqlConnection($config);
     $this->dropTables = function (): void {
-        $tables = ['settle_customer_subscription_events', 'settle_members', 'settle_teams', 'settle_users'];
+        $tables = [
+            'settle_customer_subscription_events',
+            'settle_members',
+            'settle_teams',
+            'settle_users',
+            'settle_pivots',
+            'settle_tokens',
+        ];
 
         foreach ($tables as $table) {
             $this->connection->execute("DROP TABLE IF EXISTS $table CASCADE");
@@ -252,4 +261,149 @@ describe('PostgreSQL schema diffs that settle', function (): void {
                 ->toContain(IdentifierName::derive($this->longBody, suffix: '_index'));
         },
     );
+});
+
+describe('PostgreSQL primary key columns added to existing tables', function (): void {
+    beforeEach(function (): void {
+        // A key-less pivot with rows, as tables created by hand before an entity owned them can be
+        $this->connection->execute('CREATE TABLE settle_pivots (user_id INTEGER NOT NULL, role_id INTEGER NOT NULL)');
+        $this->connection->execute('INSERT INTO settle_pivots (user_id, role_id) VALUES (1, 10), (2, 20)');
+
+        $this->keyedPivots = pgsqlSettleSchema(new #[Table('settle_pivots')] class () extends Entity
+        {
+            #[Column(primaryKey: true, autoIncrement: true)]
+            public int $id;
+
+            #[Column]
+            public int $userId;
+
+            #[Column]
+            public int $roleId;
+        });
+
+        $this->primaryKeyColumns = fn (string $table): array => array_column($this->connection->query(
+            'SELECT a.attname FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid '
+            . "AND a.attnum = ANY (c.conkey) WHERE c.conrelid = '$table'::regclass AND c.contype = 'p'",
+        ), 'attname');
+        $this->columnOf = fn (string $table, string $name) => array_find(
+            $this->introspector->getTable($table)->columns,
+            fn ($column): bool => $column->name === $name,
+        );
+    });
+
+    it('adds a serial primary key column to a table with rows and the diff is then empty', function (): void {
+        $statements = $this->generator->generateUp(($this->diffAgainst)($this->keyedPivots));
+        ($this->run)($statements);
+
+        expect($statements)->toHaveCount(1)
+            ->and($statements[0])->toContain('ADD PRIMARY KEY ("id")')
+            ->and(($this->primaryKeyColumns)('settle_pivots'))->toBe(['id'])
+            ->and(($this->diffAgainst)($this->keyedPivots)->isEmpty())->toBeTrue()
+            ->and(array_column(
+                $this->connection->query('SELECT id, user_id FROM settle_pivots ORDER BY user_id'),
+                'id',
+            ))->toEqual([1, 2]);
+    });
+
+    it(
+        'adds a uuid primary key column with a gen_random_uuid() default to a table with rows and the diff is then '
+        . 'empty',
+        function (): void {
+            $this->connection->execute('CREATE TABLE settle_tokens (owner_id UUID NOT NULL)');
+            $this->connection->execute(
+                'INSERT INTO settle_tokens (owner_id) VALUES (gen_random_uuid()), (gen_random_uuid())',
+            );
+            $keyedTokens = pgsqlSettleSchema(new #[Table('settle_tokens')] class () extends Entity
+            {
+                #[Column(type: 'uuid', primaryKey: true, default: 'gen_random_uuid()')]
+                public string $id;
+
+                #[Column(type: 'uuid')]
+                public string $ownerId;
+            });
+
+            ($this->run)($this->generator->generateUp(($this->diffAgainst)($keyedTokens)));
+            $ids = array_column($this->connection->query('SELECT id FROM settle_tokens'), 'id');
+
+            expect(($this->diffAgainst)($keyedTokens)->isEmpty())->toBeTrue()
+                ->and(($this->primaryKeyColumns)('settle_tokens'))->toBe(['id'])
+                ->and(array_unique($ids))->toHaveCount(2);
+        },
+    );
+
+    it(
+        'adds a non-auto-increment primary key column without a default to an empty table and the diff is then empty',
+        function (): void {
+            $this->connection->execute('CREATE TABLE settle_tokens (owner_id UUID NOT NULL)');
+            $keyedTokens = pgsqlSettleSchema(new #[Table('settle_tokens')] class () extends Entity
+            {
+                #[Column(type: 'uuid', primaryKey: true)]
+                public string $id;
+
+                #[Column(type: 'uuid')]
+                public string $ownerId;
+            });
+
+            ($this->run)($this->generator->generateUp(($this->diffAgainst)($keyedTokens)));
+
+            expect(($this->diffAgainst)($keyedTokens)->isEmpty())->toBeTrue()
+                ->and(($this->primaryKeyColumns)('settle_tokens'))->toBe(['id']);
+        },
+    );
+
+    it(
+        'fails loudly adding a primary key column without a default to a table with rows and leaves the table '
+        . 'unchanged',
+        function (): void {
+            $originalTable = $this->introspector->getTable('settle_pivots');
+            $codedPivots = pgsqlSettleSchema(new #[Table('settle_pivots')] class () extends Entity
+            {
+                #[Column(length: 20, primaryKey: true)]
+                public string $code;
+
+                #[Column]
+                public int $userId;
+
+                #[Column]
+                public int $roleId;
+            });
+            $statements = $this->generator->generateUp(($this->diffAgainst)($codedPivots));
+
+            // The existing rows hold NULL in the new column, which a primary key refuses
+            expect(fn () => ($this->run)($statements))->toThrow(QueryException::class)
+                ->and($this->introspector->getTable('settle_pivots'))->toEqual($originalTable);
+        },
+    );
+
+    it('refuses to add a primary key column to a table that already has a primary key', function (): void {
+        ($this->create)($this->plainUsers);
+        $compositeUsers = pgsqlSettleSchema(new #[Table('settle_users')] class () extends Entity
+        {
+            #[Column(primaryKey: true, autoIncrement: true)]
+            public int $id;
+
+            #[Column(length: 20, primaryKey: true)]
+            public string $tenant;
+
+            #[Column(length: 191)]
+            public string $email;
+        });
+
+        expect(fn () => $this->generator->generateUp(($this->diffAgainst)($compositeUsers)))->toThrow(
+            MigrationException::class,
+            "Cannot add primary key column 'tenant' to table 'settle_users', which already has a primary key on 'id'",
+        );
+    });
+
+    it('drops the added primary key column in down and the table matches the original', function (): void {
+        $originalTable = $this->introspector->getTable('settle_pivots');
+        $addition = ($this->diffAgainst)($this->keyedPivots);
+        ($this->run)($this->generator->generateUp($addition));
+        ($this->run)($this->generator->generateDown($addition));
+
+        expect($this->introspector->getTable('settle_pivots'))->toEqual($originalTable)
+            ->and(($this->primaryKeyColumns)('settle_pivots'))->toBe([])
+            ->and($this->connection->query('SELECT user_id, role_id FROM settle_pivots ORDER BY user_id'))
+            ->toEqual([['user_id' => 1, 'role_id' => 10], ['user_id' => 2, 'role_id' => 20]]);
+    });
 });
