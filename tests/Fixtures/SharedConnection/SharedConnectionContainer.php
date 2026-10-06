@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Tests\Fixtures\SharedConnection;
 
+use Marko\Clock\SystemClock;
 use Marko\Core\Container\BindingRegistry;
 use Marko\Core\Container\Container;
 use Marko\Core\Container\ContainerInterface;
@@ -12,6 +13,7 @@ use Marko\Core\Event\EventDispatcherInterface;
 use Marko\Core\Module\ModuleManifest;
 use Marko\Core\Path\ProjectPaths;
 use Marko\Database\Config\DatabaseConfig;
+use Psr\Clock\ClockInterface;
 
 /**
  * Builds a container from the real marko/database and marko/database-pgsql
@@ -31,6 +33,7 @@ class SharedConnectionContainer
         $container->instance(ContainerInterface::class, $container);
         $container->instance(Container::class, $container);
         $container->instance(DatabaseConfig::class, $config);
+        $container->instance(ClockInterface::class, new SystemClock());
         // marko/core binds the dispatcher in a real application.
         $container->instance(EventDispatcherInterface::class, new class () implements EventDispatcherInterface
         {
