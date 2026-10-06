@@ -55,6 +55,11 @@ class PgSqlGenerator implements SqlGeneratorInterface
         'enum' => 'VARCHAR',
     ];
 
+    /**
+     * The column types a sequence can take (`CREATE SEQUENCE ... AS`).
+     */
+    private const array SEQUENCE_TYPES = ['SMALLINT', 'INTEGER', 'BIGINT'];
+
     public function generateUp(
         SchemaDiff $diff,
     ): array {
@@ -483,6 +488,7 @@ class PgSqlGenerator implements SqlGeneratorInterface
     /**
      * The ALTER TABLE statement that turns $oldColumn into $column, or null when the only difference
      * is one the index diff applies (uniqueness) or that needs no DDL (such as an unspecified length).
+     * An auto-increment column whose integer type changes gets a DO block that changes its sequence too.
      *
      * @throws MigrationException When the primary key or auto-increment changes
      */
@@ -542,6 +548,59 @@ class PgSqlGenerator implements SqlGeneratorInterface
             return null;
         }
 
-        return "ALTER TABLE \"$table\" " . implode(', ', $alterations);
+        $alterTable = "ALTER TABLE \"$table\" " . implode(', ', $alterations);
+
+        if ($typeChanges && $column->autoIncrement && in_array($newType, self::SEQUENCE_TYPES, true)) {
+            return $this->generateSequenceFollowingTypeChange($table, $column->name, $newType, $alterTable);
+        }
+
+        return $alterTable;
+    }
+
+    /**
+     * One DO block that changes an auto-increment column's type together with the sequence that feeds it.
+     *
+     * A serial column's sequence keeps its own type (and the MAXVALUE that comes with it), so widening only
+     * the column would still stop at the old type's limit. The sequence is found at run time because the
+     * generator has no connection and the introspected column does not carry its name. One statement keeps
+     * the column and the sequence in step: when either part fails, neither changes. An identity column's
+     * sequence already follows the column, so changing it again is a no-op.
+     */
+    private function generateSequenceFollowingTypeChange(
+        string $table,
+        string $columnName,
+        string $sequenceType,
+        string $alterTable,
+    ): string {
+        $tableLiteral = $this->quoteStringLiteral("\"$table\"");
+        $columnLiteral = $this->quoteStringLiteral($columnName);
+        $message = $this->quoteStringLiteral(
+            "Column \"$columnName\" of table \"$table\" is auto-increment, but no sequence is owned by it, "
+            . 'so its sequence cannot change type with it. Make the sequence that feeds it owned by the column '
+            . "(ALTER SEQUENCE ... OWNED BY \"$table\".\"$columnName\"), then run the migration again.",
+        );
+
+        return <<<SQL
+            DO \$\$
+            DECLARE
+                sequence_name text := pg_get_serial_sequence($tableLiteral, $columnLiteral);
+            BEGIN
+                IF sequence_name IS NULL THEN
+                    RAISE EXCEPTION USING MESSAGE = $message;
+                END IF;
+                $alterTable;
+                EXECUTE format('ALTER SEQUENCE %s AS $sequenceType', sequence_name);
+            END
+            \$\$
+            SQL;
+    }
+
+    /**
+     * A PostgreSQL string literal holding $value.
+     */
+    private function quoteStringLiteral(
+        string $value,
+    ): string {
+        return "'" . str_replace("'", "''", $value) . "'";
     }
 }

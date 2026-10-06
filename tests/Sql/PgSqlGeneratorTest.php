@@ -530,7 +530,7 @@ describe('PgSqlGenerator', function (): void {
             new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
         ));
 
-        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT USING "id"::BIGINT']);
+        expect($statements)->toBe([pgsqlSequenceTypeChange('ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT USING "id"::BIGINT', 'BIGINT')]);
     });
 
     it('drops the default in a down migration when the old column had none', function (): void {
@@ -815,9 +815,9 @@ describe('PgSqlGenerator', function (): void {
             );
 
             expect($this->generator->generateUp($diff))->toBe([
-                'ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT USING "id"::BIGINT',
+                pgsqlSequenceTypeChange('ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT USING "id"::BIGINT', 'BIGINT'),
             ])->and($this->generator->generateDown($diff))->toBe([
-                'ALTER TABLE "posts" ALTER COLUMN "id" TYPE INTEGER USING "id"::INTEGER',
+                pgsqlSequenceTypeChange('ALTER TABLE "posts" ALTER COLUMN "id" TYPE INTEGER USING "id"::INTEGER', 'INTEGER'),
             ]);
         },
     );
@@ -903,3 +903,148 @@ function pgsqlModifyDiff(
         ),
     ]);
 }
+
+/**
+ * The DO block that changes the type of the posts.id auto-increment key together with its owned sequence.
+ */
+function pgsqlSequenceTypeChange(
+    string $alterTable,
+    string $sequenceType,
+): string {
+    return <<<SQL
+        DO \$\$
+        DECLARE
+            sequence_name text := pg_get_serial_sequence('"posts"', 'id');
+        BEGIN
+            IF sequence_name IS NULL THEN
+                RAISE EXCEPTION USING MESSAGE = 'Column "id" of table "posts" is auto-increment, but no sequence is owned by it, so its sequence cannot change type with it. Make the sequence that feeds it owned by the column (ALTER SEQUENCE ... OWNED BY "posts"."id"), then run the migration again.';
+            END IF;
+            $alterTable;
+            EXECUTE format('ALTER SEQUENCE %s AS $sequenceType', sequence_name);
+        END
+        \$\$
+        SQL;
+}
+
+describe('PgSqlGenerator auto-increment sequence type changes', function (): void {
+    beforeEach(function (): void {
+        $this->generator = new PgSqlGenerator();
+    });
+
+    it('widens the owned sequence with an auto-increment key in one statement', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'id', type: 'bigint', primaryKey: true, autoIncrement: true),
+            new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
+        ));
+
+        expect($statements)->toHaveCount(1)
+            ->and($statements[0])->toStartWith("DO \$\$\n")
+            ->and($statements[0])->toContain("pg_get_serial_sequence('\"posts\"', 'id')")
+            ->and($statements[0])->toContain('ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT USING "id"::BIGINT;')
+            ->and($statements[0])->toContain("EXECUTE format('ALTER SEQUENCE %s AS BIGINT', sequence_name);")
+            ->and($statements[0])->toEndWith("\n\$\$");
+    });
+
+    it('narrows the owned sequence back in the down migration', function (): void {
+        $statements = $this->generator->generateDown(pgsqlModifyDiff(
+            new Column(name: 'id', type: 'bigint', primaryKey: true, autoIncrement: true),
+            new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
+        ));
+
+        expect($statements)->toBe([
+            pgsqlSequenceTypeChange('ALTER TABLE "posts" ALTER COLUMN "id" TYPE INTEGER USING "id"::INTEGER', 'INTEGER'),
+        ]);
+    });
+
+    it('changes the sequence of a smallint auto-increment key widened to integer', function (): void {
+        $diff = pgsqlModifyDiff(
+            new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
+            new Column(name: 'id', type: 'smallint', primaryKey: true, autoIncrement: true),
+        );
+
+        expect($this->generator->generateUp($diff))->toBe([
+            pgsqlSequenceTypeChange('ALTER TABLE "posts" ALTER COLUMN "id" TYPE INTEGER USING "id"::INTEGER', 'INTEGER'),
+        ])->and($this->generator->generateDown($diff))->toBe([
+            pgsqlSequenceTypeChange(
+                'ALTER TABLE "posts" ALTER COLUMN "id" TYPE SMALLINT USING "id"::SMALLINT',
+                'SMALLINT',
+            ),
+        ]);
+    });
+
+    it('raises an error naming the table and column when the key owns no sequence', function (): void {
+        $statement = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'id', type: 'bigint', primaryKey: true, autoIncrement: true),
+            new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
+        ))[0];
+
+        expect($statement)->toContain("IF sequence_name IS NULL THEN\n        RAISE EXCEPTION USING MESSAGE = ")
+            ->and($statement)->toContain('Column "id" of table "posts" is auto-increment, but no sequence is owned by it')
+            ->and($statement)->toContain('ALTER SEQUENCE ... OWNED BY "posts"."id"');
+    });
+
+    it('keeps a plain ALTER TABLE for an auto-increment column whose type does not change', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'id', type: 'int', nullable: true, autoIncrement: true),
+            new Column(name: 'id', type: 'integer', autoIncrement: true),
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "id" DROP NOT NULL']);
+    });
+
+    it('keeps a plain ALTER TABLE for a type change on a column that is not auto-increment', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'views', type: 'bigint'),
+            new Column(name: 'views', type: 'integer'),
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "views" TYPE BIGINT USING "views"::BIGINT']);
+    });
+
+    it('puts a nullability change of the auto-increment column inside the same DO block', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'id', type: 'bigint', nullable: true, autoIncrement: true),
+            new Column(name: 'id', type: 'integer', autoIncrement: true),
+        ));
+
+        expect($statements)->toBe([
+            pgsqlSequenceTypeChange(
+                'ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT USING "id"::BIGINT, ALTER COLUMN "id" DROP NOT NULL',
+                'BIGINT',
+            ),
+        ]);
+    });
+
+    it('double-quotes the table name passed to pg_get_serial_sequence so a mixed-case table is found', function (): void {
+        $statement = $this->generator->generateUp(new SchemaDiff(tablesToAlter: [
+            'BlogPosts' => new TableDiff(
+                tableName: 'BlogPosts',
+                columnsToModify: [
+                    'PostId' => new Column(name: 'PostId', type: 'bigint', primaryKey: true, autoIncrement: true),
+                ],
+                columnsToModifyFrom: [
+                    'PostId' => new Column(name: 'PostId', type: 'integer', primaryKey: true, autoIncrement: true),
+                ],
+            ),
+        ]))[0];
+
+        expect($statement)->toContain("pg_get_serial_sequence('\"BlogPosts\"', 'PostId')");
+    });
+
+    it('escapes single quotes in the table and column names it embeds in string literals', function (): void {
+        $statement = $this->generator->generateUp(new SchemaDiff(tablesToAlter: [
+            "o'brien" => new TableDiff(
+                tableName: "o'brien",
+                columnsToModify: [
+                    "o'id" => new Column(name: "o'id", type: 'bigint', primaryKey: true, autoIncrement: true),
+                ],
+                columnsToModifyFrom: [
+                    "o'id" => new Column(name: "o'id", type: 'integer', primaryKey: true, autoIncrement: true),
+                ],
+            ),
+        ]))[0];
+
+        expect($statement)->toContain("pg_get_serial_sequence('\"o''brien\"', 'o''id')")
+            ->and($statement)->toContain('Column "o\'\'id" of table "o\'\'brien"');
+    });
+});
