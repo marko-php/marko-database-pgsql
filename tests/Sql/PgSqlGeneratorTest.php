@@ -7,6 +7,7 @@ namespace Marko\Database\PgSql\Tests\Sql;
 use Marko\Database\Diff\SchemaDiff;
 use Marko\Database\Diff\SqlGeneratorInterface;
 use Marko\Database\Diff\TableDiff;
+use Marko\Database\Exceptions\MigrationException;
 use Marko\Database\PgSql\Sql\PgSqlGenerator;
 use Marko\Database\Schema\Column;
 use Marko\Database\Schema\ForeignKey;
@@ -483,4 +484,222 @@ describe('PgSqlGenerator', function (): void {
 
         expect($sql)->toContain('"metadata" JSONB NOT NULL');
     });
+
+    it('emits SET DEFAULT for a default-only change in an up migration', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'status', type: 'string', length: 20, default: 'live'),
+            new Column(name: 'status', type: 'string', length: 20, default: 'draft'),
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "status" SET DEFAULT \'live\'']);
+    });
+
+    it('emits DROP DEFAULT from generateModifyColumn when the new column has no default', function (): void {
+        $sql = $this->generator->generateModifyColumn(
+            'posts',
+            new Column(name: 'status', type: 'string', length: 20),
+            new Column(name: 'status', type: 'string', length: 20, default: 'draft'),
+        );
+
+        expect($sql)->toBe('ALTER TABLE "posts" ALTER COLUMN "status" DROP DEFAULT');
+    });
+
+    it('leaves the database default alone in an up migration when the entity declares no default', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'status', type: 'string', length: 20),
+            new Column(name: 'status', type: 'string', length: 20, nullable: true, default: 'draft'),
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "status" SET NOT NULL']);
+    });
+
+    it('keeps the database length in an up migration when the entity declares no length', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'title', type: 'string', default: 'Untitled'),
+            new Column(name: 'title', type: 'string', length: 500),
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "title" SET DEFAULT \'Untitled\'']);
+    });
+
+    it('does not drop NOT NULL on an auto-increment primary key declared nullable in PHP', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'id', type: 'bigint', nullable: true, primaryKey: true, autoIncrement: true),
+            new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT']);
+    });
+
+    it('drops the default in a down migration when the old column had none', function (): void {
+        $statements = $this->generator->generateDown(pgsqlModifyDiff(
+            new Column(name: 'status', type: 'string', length: 20, default: 'live'),
+            new Column(name: 'status', type: 'string', length: 20),
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "status" DROP DEFAULT']);
+    });
+
+    it('restores a CURRENT_TIMESTAMP default unquoted in a down migration', function (): void {
+        $statements = $this->generator->generateDown(pgsqlModifyDiff(
+            new Column(name: 'created_at', type: 'timestamp', default: '2026-01-01 00:00:00'),
+            new Column(name: 'created_at', type: 'timestamp', default: 'CURRENT_TIMESTAMP'),
+        ));
+
+        expect($statements)->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "created_at" SET DEFAULT CURRENT_TIMESTAMP',
+        ]);
+
+        $sql = $this->generator->generateModifyColumn(
+            'posts',
+            new Column(name: 'created_at', type: 'timestamp', default: 'now()'),
+            new Column(name: 'created_at', type: 'timestamp'),
+        );
+
+        expect($sql)->toBe('ALTER TABLE "posts" ALTER COLUMN "created_at" SET DEFAULT now()');
+    });
+
+    it('creates a CURRENT_TIMESTAMP default unquoted', function (): void {
+        $sql = $this->generator->generateCreateTable(new Table(
+            name: 'posts',
+            columns: [new Column(name: 'created_at', type: 'timestamp', default: 'CURRENT_TIMESTAMP')],
+        ));
+
+        expect($sql)->toContain('"created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP');
+    });
+
+    it('restores modified columns before re-adding dropped foreign keys in a down migration', function (): void {
+        $foreignKey = new ForeignKey(
+            name: 'posts_author_id_foreign',
+            columns: ['author_id'],
+            referencedTable: 'users',
+            referencedColumns: ['id'],
+        );
+        $diff = new SchemaDiff(tablesToAlter: [
+            'posts' => new TableDiff(
+                tableName: 'posts',
+                columnsToModify: ['author_id' => new Column(name: 'author_id', type: 'text')],
+                foreignKeysToDrop: [$foreignKey],
+                columnsToModifyFrom: ['author_id' => new Column(name: 'author_id', type: 'integer')],
+            ),
+        ]);
+
+        expect($this->generator->generateDown($diff))->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "author_id" TYPE INTEGER',
+            'ALTER TABLE "posts" ADD CONSTRAINT "posts_author_id_foreign" FOREIGN KEY ("author_id") '
+            . 'REFERENCES "users" ("id")',
+        ]);
+    });
+
+    it('emits SET NOT NULL when a column becomes required', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'title', type: 'text'),
+            new Column(name: 'title', type: 'text', nullable: true),
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "title" SET NOT NULL']);
+    });
+
+    it('emits DROP NOT NULL when a column becomes nullable', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'title', type: 'text', nullable: true),
+            new Column(name: 'title', type: 'text'),
+        ));
+
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "title" DROP NOT NULL']);
+    });
+
+    it('combines a type change and a default change in one ALTER TABLE', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'views', type: 'bigint', default: 0),
+            new Column(name: 'views', type: 'integer'),
+        ));
+
+        expect($statements)->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "views" TYPE BIGINT, ALTER COLUMN "views" SET DEFAULT 0',
+        ]);
+    });
+
+    it('emits no statement for a column whose only difference is handled by the index diff', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'email', type: 'string'),
+            new Column(name: 'email', type: 'string', unique: true),
+        ));
+
+        expect($statements)->toBe([]);
+    });
+
+    it('throws instead of returning an empty ALTER TABLE from generateModifyColumn', function (): void {
+        $column = new Column(name: 'email', type: 'string');
+
+        expect(fn () => $this->generator->generateModifyColumn('posts', $column, $column))->toThrow(
+            MigrationException::class,
+            "Column 'posts.email' has no type, nullability or default change for PostgreSQL to apply",
+        );
+    });
+
+    it('throws when a modified column changes its auto-increment in place', function (): void {
+        expect(fn () => $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
+            new Column(name: 'id', type: 'integer', primaryKey: true),
+        )))->toThrow(
+            MigrationException::class,
+            "Cannot change the auto-increment of column 'posts.id' in place on PostgreSQL",
+        );
+    });
+
+    it('throws when a modified column changes its primary key in place', function (): void {
+        expect(fn () => $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'code', type: 'string', primaryKey: true),
+            new Column(name: 'code', type: 'string'),
+        )))->toThrow(
+            MigrationException::class,
+            "Cannot change the primary key of column 'posts.code' in place on PostgreSQL",
+        );
+    });
+
+    it('restores the old type, nullability and default in a down migration', function (): void {
+        $statements = $this->generator->generateDown(pgsqlModifyDiff(
+            new Column(name: 'views', type: 'bigint', nullable: true, default: 5),
+            new Column(name: 'views', type: 'integer', default: 0),
+        ));
+
+        expect($statements)->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "views" TYPE INTEGER, ALTER COLUMN "views" SET NOT NULL, '
+            . 'ALTER COLUMN "views" SET DEFAULT 0',
+        ]);
+    });
+
+    it('throws a MigrationException naming the column when columnsToModifyFrom is missing it', function (): void {
+        $diff = new SchemaDiff(tablesToAlter: [
+            'posts' => new TableDiff(
+                tableName: 'posts',
+                columnsToModify: ['status' => new Column(name: 'status', type: 'string', default: 'live')],
+            ),
+        ]);
+
+        expect(fn () => $this->generator->generateUp($diff))->toThrow(
+            MigrationException::class,
+            "Column 'posts.status' is modified, but the diff holds no previous definition for it",
+        )->and(fn () => $this->generator->generateDown($diff))->toThrow(
+            MigrationException::class,
+            "Column 'posts.status' is modified, but the diff holds no previous definition for it",
+        );
+    });
 });
+
+/**
+ * A schema diff that modifies one column of the posts table.
+ */
+function pgsqlModifyDiff(
+    Column $column,
+    Column $previous,
+): SchemaDiff {
+    return new SchemaDiff(tablesToAlter: [
+        'posts' => new TableDiff(
+            tableName: 'posts',
+            columnsToModify: [$column->name => $column],
+            columnsToModifyFrom: [$column->name => $previous],
+        ),
+    ]);
+}

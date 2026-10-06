@@ -7,6 +7,7 @@ namespace Marko\Database\PgSql\Sql;
 use Marko\Database\Diff\SchemaDiff;
 use Marko\Database\Diff\SqlGeneratorInterface;
 use Marko\Database\Diff\TableDiff;
+use Marko\Database\Exceptions\MigrationException;
 use Marko\Database\Schema\Column;
 use Marko\Database\Schema\ForeignKey;
 use Marko\Database\Schema\Index;
@@ -50,6 +51,18 @@ class PgSqlGenerator implements SqlGeneratorInterface
         'binary' => 'BYTEA',
         'blob' => 'BYTEA',
         'enum' => 'VARCHAR',
+    ];
+
+    /**
+     * Default values that are SQL expressions rather than string literals (matched case-insensitively).
+     *
+     * @var list<string>
+     */
+    private const array SQL_EXPRESSIONS = [
+        'CURRENT_TIMESTAMP',
+        'CURRENT_DATE',
+        'CURRENT_TIME',
+        'NOW()',
     ];
 
     public function generateUp(
@@ -142,43 +155,17 @@ class PgSqlGenerator implements SqlGeneratorInterface
         return "ALTER TABLE \"$table\" DROP COLUMN \"$columnName\"";
     }
 
+    /**
+     * @throws MigrationException When nothing PostgreSQL can alter in place differs, or the primary key or
+     *                            auto-increment changes
+     */
     public function generateModifyColumn(
         string $table,
         Column $column,
         Column $oldColumn,
     ): string {
-        $alterations = [];
-
-        // Check for type change
-        $newType = $this->mapType($column);
-        $oldType = $this->mapType($oldColumn);
-
-        if ($newType !== $oldType) {
-            $alterations[] = "ALTER COLUMN \"$column->name\" TYPE $newType";
-        }
-
-        // Check for nullability change
-        if ($column->nullable !== $oldColumn->nullable) {
-            if ($column->nullable) {
-                $alterations[] = "ALTER COLUMN \"$column->name\" DROP NOT NULL";
-            } else {
-                $alterations[] = "ALTER COLUMN \"$column->name\" SET NOT NULL";
-            }
-        }
-
-        // Check for default change
-        if ($column->default !== $oldColumn->default) {
-            if ($column->default === null) {
-                $alterations[] = "ALTER COLUMN \"$column->name\" DROP DEFAULT";
-            } else {
-                $defaultValue = $this->formatDefaultValue($column->default);
-                $alterations[] = "ALTER COLUMN \"$column->name\" SET DEFAULT $defaultValue";
-            }
-        }
-
-        $alterationsSql = implode(', ', $alterations);
-
-        return "ALTER TABLE \"$table\" $alterationsSql";
+        return $this->generateModifyColumnIfChanged($table, $column, $oldColumn)
+            ?? throw MigrationException::nothingToModify($table, $column->name, 'PostgreSQL');
     }
 
     public function generateAddIndex(
@@ -322,6 +309,11 @@ class PgSqlGenerator implements SqlGeneratorInterface
         }
 
         if (is_string($value)) {
+            // SQL expressions (also what introspection reads back) are emitted as-is
+            if (in_array(strtoupper($value), self::SQL_EXPRESSIONS, true)) {
+                return $value;
+            }
+
             // Escape single quotes
             $escaped = str_replace("'", "''", $value);
 
@@ -366,14 +358,8 @@ class PgSqlGenerator implements SqlGeneratorInterface
             $statements[] = $this->generateDropColumn($diff->tableName, $column->name);
         }
 
-        // Modify columns (note: we don't have the old column in TableDiff,
-        // so we generate a type change only)
-        foreach ($diff->columnsToModify as $columnName => $column) {
-            // Without the old column, we can only do a basic type alteration
-            $statements[] = "ALTER TABLE \"$diff->tableName\" ALTER COLUMN \"$columnName\" TYPE " . $this->mapType(
-                $column,
-            );
-        }
+        // Modify columns
+        $statements = [...$statements, ...$this->generateColumnModifications($diff, reverse: false)];
 
         // Add indexes
         foreach ($diff->indexesToAdd as $index) {
@@ -408,6 +394,16 @@ class PgSqlGenerator implements SqlGeneratorInterface
     ): array {
         $statements = [];
 
+        // Reverse: drop added foreign keys
+        foreach ($diff->foreignKeysToAdd as $foreignKey) {
+            $statements[] = $this->generateDropForeignKey($diff->tableName, $foreignKey->name);
+        }
+
+        // Reverse: drop added indexes
+        foreach ($diff->indexesToAdd as $index) {
+            $statements[] = $this->generateDropIndex($diff->tableName, $index->name);
+        }
+
         // Reverse: drop added columns
         foreach ($diff->columnsToAdd as $column) {
             $statements[] = $this->generateDropColumn($diff->tableName, $column->name);
@@ -418,19 +414,12 @@ class PgSqlGenerator implements SqlGeneratorInterface
             $statements[] = $this->generateAddColumn($diff->tableName, $column);
         }
 
-        // Reverse: drop added indexes
-        foreach ($diff->indexesToAdd as $index) {
-            $statements[] = $this->generateDropIndex($diff->tableName, $index->name);
-        }
+        // Reverse: restore modified columns before the indexes and foreign keys that rely on them
+        $statements = [...$statements, ...$this->generateColumnModifications($diff, reverse: true)];
 
         // Reverse: add dropped indexes
         foreach ($diff->indexesToDrop as $index) {
             $statements[] = $this->generateAddIndex($diff->tableName, $index);
-        }
-
-        // Reverse: drop added foreign keys
-        foreach ($diff->foreignKeysToAdd as $foreignKey) {
-            $statements[] = $this->generateDropForeignKey($diff->tableName, $foreignKey->name);
         }
 
         // Reverse: add dropped foreign keys
@@ -439,5 +428,105 @@ class PgSqlGenerator implements SqlGeneratorInterface
         }
 
         return $statements;
+    }
+
+    /**
+     * ALTER TABLE statements that apply (or, in reverse, undo) every modified column of a table diff.
+     *
+     * @return list<string>
+     * @throws MigrationException When the diff holds no previous definition for a modified column, or
+     *                            the primary key or auto-increment changes
+     */
+    private function generateColumnModifications(
+        TableDiff $diff,
+        bool $reverse,
+    ): array {
+        $statements = [];
+
+        foreach ($diff->columnsToModify as $columnName => $column) {
+            $previous = $diff->previousColumn($columnName);
+            $target = $this->targetColumn($column, $previous);
+
+            $statement = $reverse
+                ? $this->generateModifyColumnIfChanged($diff->tableName, $previous, $target)
+                : $this->generateModifyColumnIfChanged($diff->tableName, $target, $previous);
+
+            if ($statement !== null) {
+                $statements[] = $statement;
+            }
+        }
+
+        return $statements;
+    }
+
+    /**
+     * The column an up migration actually moves to: the entity column, with the same tolerances the
+     * diff applies (Column::equals()). An entity that declares no length or no default keeps the
+     * database's, and an auto-increment primary key keeps its nullability whatever the PHP property allows.
+     */
+    private function targetColumn(
+        Column $column,
+        Column $previous,
+    ): Column {
+        return new Column(
+            name: $column->name,
+            type: $column->type,
+            length: $column->length ?? $previous->length,
+            nullable: $column->primaryKey && $column->autoIncrement ? $previous->nullable : $column->nullable,
+            default: $column->default ?? $previous->default,
+            unique: $column->unique,
+            primaryKey: $column->primaryKey,
+            autoIncrement: $column->autoIncrement,
+            references: $column->references,
+            onDelete: $column->onDelete,
+            onUpdate: $column->onUpdate,
+        );
+    }
+
+    /**
+     * The ALTER TABLE statement that turns $oldColumn into $column, or null when the only difference
+     * is one the index diff applies (uniqueness) or that needs no DDL (such as an unspecified length).
+     *
+     * @throws MigrationException When the primary key or auto-increment changes
+     */
+    private function generateModifyColumnIfChanged(
+        string $table,
+        Column $column,
+        Column $oldColumn,
+    ): ?string {
+        if ($column->primaryKey !== $oldColumn->primaryKey) {
+            throw MigrationException::columnChangeNotSupported($table, $column->name, 'PostgreSQL', 'primary key');
+        }
+
+        if ($column->autoIncrement !== $oldColumn->autoIncrement) {
+            throw MigrationException::columnChangeNotSupported($table, $column->name, 'PostgreSQL', 'auto-increment');
+        }
+
+        $alterations = [];
+
+        $newType = $this->mapType($column);
+
+        if ($newType !== $this->mapType($oldColumn)) {
+            $alterations[] = "ALTER COLUMN \"$column->name\" TYPE $newType";
+        }
+
+        // A primary key column is always NOT NULL, whatever the PHP property allows
+        if ($column->nullable !== $oldColumn->nullable && !$column->primaryKey) {
+            $nullability = $column->nullable ? 'DROP NOT NULL' : 'SET NOT NULL';
+            $alterations[] = "ALTER COLUMN \"$column->name\" $nullability";
+        }
+
+        // An auto-increment column's default is its sequence, which is never altered here
+        if ($column->default !== $oldColumn->default && !$column->autoIncrement) {
+            $alterations[] = $column->default === null
+                ? "ALTER COLUMN \"$column->name\" DROP DEFAULT"
+                : "ALTER COLUMN \"$column->name\" SET DEFAULT " . $this->formatDefaultValue($column->default);
+        }
+
+        if ($alterations === []) {
+            return null;
+        }
+
+        return "ALTER TABLE \"$table\" " . implode(', ', $alterations);
     }
 }
