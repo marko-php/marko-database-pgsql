@@ -4,9 +4,13 @@ declare(strict_types=1);
 
 use Marko\Database\Exceptions\CheckConstraintViolationException;
 use Marko\Database\Exceptions\ConstraintViolationException;
+use Marko\Database\Exceptions\DeadlockException;
 use Marko\Database\Exceptions\ForeignKeyConstraintViolationException;
+use Marko\Database\Exceptions\LockTimeoutException;
 use Marko\Database\Exceptions\NotNullConstraintViolationException;
 use Marko\Database\Exceptions\QueryException;
+use Marko\Database\Exceptions\SerializationFailureException;
+use Marko\Database\Exceptions\TransactionConflictException;
 use Marko\Database\Exceptions\UniqueConstraintViolationException;
 use Marko\Database\PgSql\Connection\PgSqlExceptionTranslator;
 
@@ -131,6 +135,8 @@ describe('PgSqlExceptionTranslator', function (): void {
 
         expect($exception)->toBeInstanceOf(QueryException::class)
             ->and($exception)->not->toBeInstanceOf(ConstraintViolationException::class)
+            ->and($exception)->not->toBeInstanceOf(TransactionConflictException::class)
+            ->and($exception)->not->toBeInstanceOf(LockTimeoutException::class)
             ->and($exception->sqlState())->toBe('42P01')
             ->and($exception->getPrevious())->toBe($pdoException);
     });
@@ -145,5 +151,40 @@ describe('PgSqlExceptionTranslator', function (): void {
 
         expect($exception)->toBeInstanceOf(UniqueConstraintViolationException::class)
             ->and($exception->constraintName())->toBe('t_key');
+    });
+
+    it('translates SQLSTATE 40P01 into DeadlockException', function (): void {
+        $pdoException = pgsqlDriverError(
+            '40P01',
+            "ERROR:  deadlock detected\nDETAIL:  Process 1 waits for ShareLock on transaction 2; blocked by process 3.",
+        );
+
+        $exception = new PgSqlExceptionTranslator()->translate($pdoException, 'UPDATE accounts SET n = $1', [1]);
+
+        expect($exception)->toBeInstanceOf(DeadlockException::class)
+            ->and($exception->sqlState())->toBe('40P01')
+            ->and($exception->getPrevious())->toBe($pdoException);
+    });
+
+    it('translates SQLSTATE 40001 into SerializationFailureException', function (): void {
+        $pdoException = pgsqlDriverError('40001', 'ERROR:  could not serialize access due to concurrent update');
+
+        $exception = new PgSqlExceptionTranslator()->translate($pdoException, 'UPDATE accounts SET n = $1', [1]);
+
+        expect($exception)->toBeInstanceOf(SerializationFailureException::class)
+            ->and($exception->sqlState())->toBe('40001');
+    });
+
+    it('translates SQLSTATE 55P03 into LockTimeoutException', function (): void {
+        $pdoException = pgsqlDriverError('55P03', 'ERROR:  could not obtain lock on row in relation "jobs"');
+
+        $exception = new PgSqlExceptionTranslator()->translate(
+            $pdoException,
+            'SELECT * FROM "jobs" WHERE "id" = $1 FOR UPDATE NOWAIT',
+            [1],
+        );
+
+        expect($exception)->toBeInstanceOf(LockTimeoutException::class)
+            ->and($exception->sqlState())->toBe('55P03');
     });
 });

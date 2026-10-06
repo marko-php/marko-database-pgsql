@@ -13,6 +13,7 @@ use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\Connection\TransactionState;
 use Marko\Database\Exceptions\QueryException;
+use Marko\Database\Exceptions\TransactionConflictException;
 use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\PgSql\Exceptions\ConnectionException;
 use Override;
@@ -259,18 +260,23 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
      * Open a transaction, or a savepoint named marko_sp_{depth} when one is
      * already open.
      *
-     * @throws ConnectionException
+     * @throws ConnectionException|QueryException
      */
     public function beginTransaction(): void
     {
         $this->ensureConnected();
 
         $level = $this->transactionState->level();
+        $statement = $level === 0 ? 'BEGIN' : 'SAVEPOINT ' . $this->savepointName($level);
 
-        if ($level === 0) {
-            $this->pdo->beginTransaction();
-        } else {
-            $this->pdo->exec('SAVEPOINT ' . $this->savepointName($level));
+        try {
+            if ($level === 0) {
+                $this->pdo->beginTransaction();
+            } else {
+                $this->pdo->exec($statement);
+            }
+        } catch (PDOException $e) {
+            throw $this->exceptionTranslator->translate($e, $statement, []);
         }
 
         $this->transactionState->begin();
@@ -283,40 +289,14 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
      *
      * When the outermost COMMIT fails, the transaction is rolled back (if the
      * server left it open), the after-rollback callbacks run, and the COMMIT
-     * error is rethrown.
+     * error is rethrown, translated like any other statement error (so a
+     * conflict detected at COMMIT is a TransactionConflictException).
      *
-     * @throws ConnectionException|TransactionException|Throwable
+     * @throws ConnectionException|TransactionException|QueryException|Throwable
      */
     public function commit(): void
     {
-        $level = $this->transactionState->level();
-
-        if ($level === 0) {
-            throw TransactionException::notInTransaction();
-        }
-
-        $this->ensureConnected();
-
-        try {
-            if ($level === 1) {
-                $this->pdo->commit();
-            } else {
-                $this->pdo->exec('RELEASE SAVEPOINT ' . $this->savepointName($level - 1));
-            }
-        } catch (Throwable $e) {
-            if ($level === 1) {
-                if ($this->pdo->inTransaction()) {
-                    $this->pdo->rollBack();
-                }
-
-                $this->transactionState->rollback();
-            } else {
-                $this->transactionState->discard();
-            }
-
-            throw $e;
-        }
-
+        $this->commitStatement();
         $this->transactionState->commit();
     }
 
@@ -325,7 +305,11 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
      * ROLLBACK TO SAVEPOINT when nested. The level's after-commit callbacks
      * are discarded and its after-rollback callbacks run.
      *
-     * @throws ConnectionException|TransactionException|Throwable
+     * When the server has already ended the transaction (MySQL does this on a
+     * deadlock), there is nothing left to roll back: the level is closed as
+     * rolled back without sending a statement.
+     *
+     * @throws ConnectionException|TransactionException|QueryException|Throwable
      */
     public function rollback(): void
     {
@@ -336,17 +320,20 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
         }
 
         $this->ensureConnected();
+        $statement = $level === 1 ? 'ROLLBACK' : 'ROLLBACK TO SAVEPOINT ' . $this->savepointName($level - 1);
 
         try {
-            if ($level === 1) {
-                $this->pdo->rollBack();
-            } else {
-                $this->pdo->exec('ROLLBACK TO SAVEPOINT ' . $this->savepointName($level - 1));
+            if ($this->pdo->inTransaction()) {
+                if ($level === 1) {
+                    $this->pdo->rollBack();
+                } else {
+                    $this->pdo->exec($statement);
+                }
             }
         } catch (Throwable $e) {
             $this->transactionState->discard();
 
-            throw $e;
+            throw $e instanceof PDOException ? $this->exceptionTranslator->translate($e, $statement, []) : $e;
         }
 
         $this->transactionState->rollback();
@@ -363,27 +350,120 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
     }
 
     /**
-     * Commit happens outside the try so a failed COMMIT is never followed by
-     * a second rollback attempt (commit() already cleans up after itself).
+     * Run the callback in a transaction, retrying the outermost transaction
+     * on a TransactionConflictException up to $attempts runs in total.
      *
-     * @throws ConnectionException|Throwable|TransactionException
+     * The COMMIT statement is sent apart from running the after-commit
+     * callbacks, so a conflict raised by COMMIT is retried while an exception
+     * from an after-commit callback (the data is already committed) is not.
+     * A failed COMMIT is never followed by a second rollback attempt
+     * (commitStatement() already cleans up after itself).
+     *
+     * @throws ConnectionException|TransactionException|QueryException|Throwable
      */
     public function transaction(
         callable $callback,
+        int $attempts = 1,
     ): mixed {
-        $this->beginTransaction();
-
-        try {
-            $result = $callback();
-        } catch (Throwable $e) {
-            $this->rollback();
-
-            throw $e;
+        if ($attempts < 1) {
+            throw TransactionException::invalidAttempts($attempts);
         }
 
-        $this->commit();
+        // A nested call never retries: the outermost transaction() owns the retry.
+        $maxAttempts = $this->transactionState->level() === 0 ? $attempts : 1;
 
-        return $result;
+        for ($attempt = 1; ; $attempt++) {
+            $this->beginTransaction();
+
+            try {
+                $result = $callback();
+            } catch (Throwable $e) {
+                $this->rollbackAfterFailure($e);
+
+                if ($e instanceof TransactionConflictException && $attempt < $maxAttempts) {
+                    continue;
+                }
+
+                throw $e;
+            }
+
+            try {
+                $this->commitStatement();
+            } catch (TransactionConflictException $e) {
+                if ($attempt < $maxAttempts) {
+                    continue;
+                }
+
+                throw $e;
+            }
+
+            $this->transactionState->commit();
+
+            return $result;
+        }
+    }
+
+    /**
+     * Send COMMIT (outermost level) or RELEASE SAVEPOINT (nested level). On
+     * success the level stays open in the transaction state, and the caller
+     * closes it with TransactionState::commit(), which runs the after-commit
+     * callbacks. On failure the level is closed (rolled back at the outermost
+     * level, running its after-rollback callbacks) and the translated error
+     * is thrown.
+     *
+     * @throws ConnectionException|TransactionException|QueryException|Throwable
+     */
+    private function commitStatement(): void
+    {
+        $level = $this->transactionState->level();
+
+        if ($level === 0) {
+            throw TransactionException::notInTransaction();
+        }
+
+        $this->ensureConnected();
+        $statement = $level === 1 ? 'COMMIT' : 'RELEASE SAVEPOINT ' . $this->savepointName($level - 1);
+
+        try {
+            if ($level === 1) {
+                $this->pdo->commit();
+            } else {
+                $this->pdo->exec($statement);
+            }
+        } catch (Throwable $e) {
+            if ($level === 1) {
+                if ($this->pdo->inTransaction()) {
+                    $this->pdo->rollBack();
+                }
+
+                $this->transactionState->rollback();
+            } else {
+                $this->transactionState->discard();
+            }
+
+            throw $e instanceof PDOException ? $this->exceptionTranslator->translate($e, $statement, []) : $e;
+        }
+    }
+
+    /**
+     * Roll back the level a failed callback ran in. When that rollback fails
+     * too, the callback's TransactionConflictException wins: the rollback
+     * error is a consequence of the conflict (the level is closed either
+     * way), and the outermost transaction() must still see the conflict to
+     * retry it. Any other failure keeps the rollback error.
+     *
+     * @throws ConnectionException|TransactionException|QueryException|Throwable
+     */
+    private function rollbackAfterFailure(
+        Throwable $failure,
+    ): void {
+        try {
+            $this->rollback();
+        } catch (Throwable $rollbackError) {
+            if (!$failure instanceof TransactionConflictException) {
+                throw $rollbackError;
+            }
+        }
     }
 
     public function afterCommit(

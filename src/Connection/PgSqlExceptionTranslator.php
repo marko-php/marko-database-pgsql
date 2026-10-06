@@ -5,9 +5,12 @@ declare(strict_types=1);
 namespace Marko\Database\PgSql\Connection;
 
 use Marko\Database\Exceptions\CheckConstraintViolationException;
+use Marko\Database\Exceptions\DeadlockException;
 use Marko\Database\Exceptions\ForeignKeyConstraintViolationException;
+use Marko\Database\Exceptions\LockTimeoutException;
 use Marko\Database\Exceptions\NotNullConstraintViolationException;
 use Marko\Database\Exceptions\QueryException;
+use Marko\Database\Exceptions\SerializationFailureException;
 use Marko\Database\Exceptions\UniqueConstraintViolationException;
 use PDOException;
 
@@ -19,6 +22,9 @@ use PDOException;
  * - 23503 foreign_key_violation → ForeignKeyConstraintViolationException
  * - 23502 not_null_violation    → NotNullConstraintViolationException
  * - 23514 check_violation       → CheckConstraintViolationException
+ * - 40P01 deadlock_detected     → DeadlockException
+ * - 40001 serialization_failure → SerializationFailureException
+ * - 55P03 lock_not_available    → LockTimeoutException (lock_timeout, NOWAIT)
  * - anything else               → QueryException
  *
  * The constraint, table and column are parsed from the server message.
@@ -69,6 +75,9 @@ class PgSqlExceptionTranslator
                 constraintName: $constraintName,
                 table: $table,
             ),
+            '40P01' => DeadlockException::fromDriverError($exception, $sql, $bindings),
+            '40001' => SerializationFailureException::fromDriverError($exception, $sql, $bindings),
+            '55P03' => LockTimeoutException::fromDriverError($exception, $sql, $bindings),
             default => QueryException::fromDriverError($exception, $sql, $bindings),
         };
     }

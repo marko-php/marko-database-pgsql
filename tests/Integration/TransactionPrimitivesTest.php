@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace Marko\Database\PgSql\Tests\Integration;
 
 use Marko\Database\Config\DatabaseConfig;
+use Marko\Database\Exceptions\LockTimeoutException;
+use Marko\Database\Exceptions\QueryException;
+use Marko\Database\Exceptions\UniqueConstraintViolationException;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use Marko\Database\PgSql\Query\PgSqlQueryBuilder;
 use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\SharedConnectionContainer;
-use PDOException;
 use RuntimeException;
 
 /**
@@ -37,13 +39,17 @@ function pgsqlPrimitivesConfig(): ?DatabaseConfig
 /**
  * @return list<string>
  */
-function pgsqlPrimitiveNames(PgSqlConnection $connection): array
-{
+function pgsqlPrimitiveNames(
+    PgSqlConnection $connection,
+): array {
     return array_column($connection->query('SELECT name FROM primitives_items ORDER BY id'), 'name');
 }
 
-function pgsqlInsertItem(PgSqlConnection $connection, int $id, string $name): void
-{
+function pgsqlInsertItem(
+    PgSqlConnection $connection,
+    int $id,
+    string $name,
+): void {
     $connection->execute('INSERT INTO primitives_items (id, name) VALUES (?, ?)', [$id, $name]);
 }
 
@@ -97,7 +103,7 @@ describe('PostgreSQL nested transactions', function (): void {
                     // savepoint rollback must make it usable again.
                     pgsqlInsertItem($this->connection, 1, 'duplicate key');
                 });
-            } catch (PDOException) {
+            } catch (UniqueConstraintViolationException) {
                 // Handled: only the savepoint is rolled back.
             }
 
@@ -199,7 +205,7 @@ describe('PostgreSQL row locks', function (): void {
                 ->get(),
         );
 
-        expect($contend)->toThrow(PDOException::class, 'could not obtain lock');
+        expect($contend)->toThrow(LockTimeoutException::class, 'could not obtain lock');
 
         $this->connection->rollback();
     });
@@ -292,6 +298,6 @@ describe('PostgreSQL upsert', function (): void {
             ['email'],
         );
 
-        expect($upsert)->toThrow(PDOException::class, 'cannot affect row a second time');
+        expect($upsert)->toThrow(QueryException::class, 'cannot affect row a second time');
     });
 });

@@ -103,6 +103,7 @@ class RecordingTransactionalConnection implements ConnectionInterface, Transacti
 
     public function transaction(
         callable $callback,
+        int $attempts = 1,
     ): mixed {
         return $callback();
     }
