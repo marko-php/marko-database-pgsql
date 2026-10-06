@@ -441,3 +441,18 @@ describe('PgSqlQueryBuilder having denylist (shared with raw helpers)', function
             ->toThrow(InvalidColumnException::class);
     });
 });
+
+describe('PgSqlQueryBuilder # operators', function (): void {
+    it('allows the #>> operator in a raw fragment, since # is not a comment marker here', function (): void {
+        $connection = new MockConnection();
+        $builder = new PgSqlQueryBuilder($connection);
+
+        $builder
+            ->table('users')
+            ->whereRaw("meta #>> '{address,city}' = ?", ['Rome'])
+            ->get();
+
+        expect($connection->lastQuerySql)->toBe("SELECT * FROM \"users\" WHERE meta #>> '{address,city}' = ?")
+            ->and($connection->lastQueryBindings)->toBe(['Rome']);
+    });
+});
