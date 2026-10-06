@@ -1195,7 +1195,10 @@ describe('PgSqlGenerator identifier quoting', function (): void {
                 $code = (string) file_get_contents("$source/$file");
 
                 // An escaped double quote around an interpolation, or a double-quote string literal concatenated onto a name
-                expect(preg_match('/\\\\"\$|\'"\'\s*\.|\.\s*\'"\'/', $code))->toBe(0, "$file quotes an identifier inline");
+                expect(preg_match('/\\\\"\$|\'"\'\s*\.|\.\s*\'"\'/', $code))->toBe(
+                    0,
+                    "$file quotes an identifier inline",
+                );
             }
         },
     );
