@@ -6,6 +6,8 @@ namespace Marko\Database\PgSql\Tests\Integration;
 
 use Marko\Core\Path\ProjectPaths;
 use Marko\Database\Diff\DiffCalculator;
+use Marko\Database\Diff\ExpressionDefaultCanonicalizer;
+use Marko\Database\Exceptions\MigrationException;
 use Marko\Database\Exceptions\QueryException;
 use Marko\Database\Migration\MigrationGenerator;
 use Marko\Database\Migration\MigrationRepository;
@@ -68,10 +70,18 @@ beforeEach(function (): void {
         $this->connection->execute($this->generator->generateCreateTable($table));
     };
 
-    $this->diffAgainst = fn (Table $entityTable) => $this->calculator->calculate(
-        ['cast_default_items' => $entityTable],
-        ['cast_default_items' => $this->introspector->getTable('cast_default_items')],
-    );
+    // As db:diff does: expression defaults PostgreSQL respells are settled before the diff
+    $this->diffAgainst = function (Table $entityTable) {
+        $databaseSchema = ['cast_default_items' => $this->introspector->getTable('cast_default_items')];
+
+        return $this->calculator->calculate(
+            new ExpressionDefaultCanonicalizer($this->introspector)->canonicalize(
+                ['cast_default_items' => $entityTable],
+                $databaseSchema,
+            ),
+            $databaseSchema,
+        );
+    };
 
     $this->run = function (array $statements): void {
         foreach ($statements as $statement) {
@@ -419,4 +429,85 @@ describe('PostgreSQL expression defaults', function (): void {
         expect($this->connection->query('SELECT ref FROM cast_default_items')[0]['ref'])->toBeString()
             ->and(($this->diffAgainst)($original)->isEmpty())->toBeTrue();
     });
+
+    it('diffs an interval arithmetic expression default as empty right after creation', function (): void {
+        $entityTable = pgsqlCastDefaultTable(
+            pgsqlSerialId(),
+            new Column(name: 'expires_at', type: 'timestamp', default: new Expression("now() + interval '1 day'")),
+            new Column(name: 'label', type: 'text', default: new Expression("'a' || 'b'")),
+        );
+        ($this->create)($entityTable);
+
+        expect($this->introspector->getTable('cast_default_items')->columns[1]->default)
+            ->toEqual(new Expression("(now() + '1 day'::interval)"))
+            ->and(($this->diffAgainst)($entityTable)->isEmpty())->toBeTrue();
+    });
+
+    it('still diffs a changed interval expression and sets the new default', function (): void {
+        ($this->create)(pgsqlCastDefaultTable(
+            pgsqlSerialId(),
+            new Column(name: 'expires_at', type: 'timestamp', default: new Expression("now() + interval '1 day'")),
+        ));
+
+        $entityTable = pgsqlCastDefaultTable(
+            pgsqlSerialId(),
+            new Column(name: 'expires_at', type: 'timestamp', default: new Expression("now() + interval '7 days'")),
+        );
+        $diff = ($this->diffAgainst)($entityTable);
+        $statements = $this->generator->generateUp($diff);
+        ($this->run)($statements);
+
+        expect($statements)->toContain(
+            "ALTER TABLE \"cast_default_items\" ALTER COLUMN \"expires_at\" SET DEFAULT now() + interval '7 days'",
+        )
+            ->and($this->introspector->getTable('cast_default_items')->columns[1]->default)
+            ->toEqual(new Expression("(now() + '7 days'::interval)"))
+            ->and(($this->diffAgainst)($entityTable)->isEmpty())->toBeTrue();
+    });
+
+    it('fails at diff time for an expression PostgreSQL rejects', function (): void {
+        ($this->create)(pgsqlCastDefaultTable(
+            pgsqlSerialId(),
+            new Column(name: 'expires_at', type: 'timestamp', default: new Expression("now() + interval '1 day'")),
+        ));
+
+        $entityTable = pgsqlCastDefaultTable(
+            pgsqlSerialId(),
+            new Column(name: 'expires_at', type: 'timestamp', default: new Expression("now() + 'tomorrow'")),
+        );
+
+        expect(fn () => ($this->diffAgainst)($entityTable))->toThrow(
+            MigrationException::class,
+            "The database rejects the default expression \"now() + 'tomorrow'\" of column "
+            . "'cast_default_items.expires_at'",
+        );
+    });
+
+    it(
+        'leaves no probe table behind and keeps the connection usable after a rejected expression',
+        function (): void {
+            ($this->create)(pgsqlCastDefaultTable(
+                pgsqlSerialId(),
+                new Column(name: 'expires_at', type: 'timestamp', default: new Expression("now() + interval '1 day'")),
+            ));
+            $rejected = pgsqlCastDefaultTable(
+                pgsqlSerialId(),
+                new Column(name: 'expires_at', type: 'timestamp', default: new Expression('now() +')),
+            );
+
+            try {
+                ($this->diffAgainst)($rejected);
+            } catch (MigrationException) {
+                // Expected: the next statements must still run on the same connection
+            }
+
+            $probeTables = $this->connection->query(
+                "SELECT relname FROM pg_class WHERE relname = 'marko_default_probe'",
+            );
+
+            expect($probeTables)->toBe([])
+                ->and($this->connection->inTransaction())->toBeFalse()
+                ->and($this->connection->query('SELECT 1 AS one')[0]['one'])->toBe(1);
+        },
+    );
 });
