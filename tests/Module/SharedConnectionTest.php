@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Tests\Module;
 
+use Marko\Database\Connection\ConnectionFactoryInterface;
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\Connection\SleeperInterface;
 use Marko\Database\Connection\StatementInterface;
+use Marko\Database\Connection\TransactionBackoff;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
@@ -14,6 +17,7 @@ use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\AuditEntryRepository;
 use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\SharedConnectionContainer;
 use Marko\Database\Query\QueryBuilderFactoryInterface;
 use Marko\Database\Seed\SeederRunner;
+use Marko\Testing\Fake\FakeSleeper;
 use ReflectionProperty;
 use RuntimeException;
 
@@ -40,6 +44,29 @@ describe('PostgreSQL shared connection wiring', function (): void {
 
         expect($factoryConnection)->toBe($accounts->exposedConnection())
             ->and($standaloneConnection)->toBe($accounts->exposedConnection());
+    });
+
+    it('resolves PgSqlConnection with the container-bound TransactionBackoff', function (): void {
+        $container = SharedConnectionContainer::build(SharedConnectionContainer::config());
+        $sleeper = new FakeSleeper();
+        $container->instance(SleeperInterface::class, $sleeper);
+
+        $connection = $container->get(ConnectionInterface::class);
+        $backoff = new ReflectionProperty($connection, 'transactionBackoff')->getValue($connection);
+
+        expect($backoff)->toBeInstanceOf(TransactionBackoff::class)
+            ->and(new ReflectionProperty($backoff, 'sleeper')->getValue($backoff))->toBe($sleeper);
+    });
+
+    it('gives connections made by the container-built factory the bound TransactionBackoff', function (): void {
+        $container = SharedConnectionContainer::build(SharedConnectionContainer::config());
+        $sleeper = new FakeSleeper();
+        $container->instance(SleeperInterface::class, $sleeper);
+
+        $connection = $container->get(ConnectionFactoryInterface::class)->make(SharedConnectionContainer::config());
+        $backoff = new ReflectionProperty($connection, 'transactionBackoff')->getValue($connection);
+
+        expect(new ReflectionProperty($backoff, 'sleeper')->getValue($backoff))->toBe($sleeper);
     });
 
     it('resolves TransactionInterface to the shared ConnectionInterface instance', function (): void {

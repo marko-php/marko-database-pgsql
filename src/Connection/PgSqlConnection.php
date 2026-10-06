@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Connection;
 
+use Closure;
 use JsonException;
 use Marko\Core\Contracts\ResettableInterface;
 use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\PendingAfterCommitInterface;
 use Marko\Database\Connection\StatementInterface;
+use Marko\Database\Connection\TransactionBackoff;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\Connection\TransactionState;
 use Marko\Database\Exceptions\QueryException;
@@ -32,6 +34,7 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
         private readonly DatabaseConfig $config,
         private readonly string $charset = 'utf8',
         private readonly PgSqlExceptionTranslator $exceptionTranslator = new PgSqlExceptionTranslator(),
+        private readonly TransactionBackoff $transactionBackoff = new TransactionBackoff(),
     ) {
         $this->transactionState = new TransactionState();
     }
@@ -351,7 +354,8 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
 
     /**
      * Run the callback in a transaction, retrying the outermost transaction
-     * on a TransactionConflictException up to $attempts runs in total.
+     * on a TransactionConflictException up to $attempts runs in total, and
+     * waiting between attempts as $backoff says (see TransactionBackoff).
      *
      * The COMMIT statement is sent apart from running the after-commit
      * callbacks, so a conflict raised by COMMIT is retried while an exception
@@ -364,10 +368,13 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
     public function transaction(
         callable $callback,
         int $attempts = 1,
+        int|Closure|null $backoff = null,
     ): mixed {
         if ($attempts < 1) {
             throw TransactionException::invalidAttempts($attempts);
         }
+
+        $this->transactionBackoff->validate($backoff);
 
         // A nested call never retries: the outermost transaction() owns the retry.
         $maxAttempts = $this->transactionState->level() === 0 ? $attempts : 1;
@@ -381,6 +388,8 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
                 $this->rollbackAfterFailure($e);
 
                 if ($e instanceof TransactionConflictException && $attempt < $maxAttempts) {
+                    $this->transactionBackoff->wait($attempt, $backoff, $e);
+
                     continue;
                 }
 
@@ -391,6 +400,8 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
                 $this->commitStatement();
             } catch (TransactionConflictException $e) {
                 if ($attempt < $maxAttempts) {
+                    $this->transactionBackoff->wait($attempt, $backoff, $e);
+
                     continue;
                 }
 

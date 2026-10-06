@@ -7,8 +7,11 @@ namespace Marko\Database\PgSql\Tests\Connection;
 use Marko\Core\Path\ProjectPaths;
 use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\Connection\TransactionBackoff;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use Marko\Database\PgSql\Connection\PgSqlConnectionFactory;
+use Marko\Testing\Fake\FakeSleeper;
+use ReflectionProperty;
 
 function makeFactoryTestConfig(): DatabaseConfig
 {
@@ -58,5 +61,14 @@ describe('PgSqlConnectionFactory', function (): void {
         // The charset ('utf8') is the PgSqlConnection default — injected at construction
         expect($connection)->toBeInstanceOf(PgSqlConnection::class)
             ->and($connection->getDsn())->toBe('pgsql:host=localhost;port=5432;dbname=test');
+    });
+
+    it('passes the TransactionBackoff to connections made by PgSqlConnectionFactory', function (): void {
+        $backoff = new TransactionBackoff(new FakeSleeper());
+        $factory = new PgSqlConnectionFactory(transactionBackoff: $backoff);
+
+        $connection = $factory->make(makeFactoryTestConfig());
+
+        expect(new ReflectionProperty($connection, 'transactionBackoff')->getValue($connection))->toBe($backoff);
     });
 });

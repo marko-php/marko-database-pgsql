@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Tests\Connection;
 
+use Closure;
 use Marko\Database\Config\DatabaseConfig;
+use Marko\Database\Connection\TransactionBackoff;
 use Marko\Database\Exceptions\DeadlockException;
 use Marko\Database\Exceptions\QueryException;
 use Marko\Database\Exceptions\SerializationFailureException;
@@ -12,12 +14,16 @@ use Marko\Database\Exceptions\TransactionConflictException;
 use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use Marko\Database\PgSql\Tests\Fixtures\Retry\ScriptedPdo;
+use Marko\Testing\Fake\FakeSleeper;
 use PDO;
 use PDOException;
+use Random\Engine\Mt19937;
+use Random\Randomizer;
 use RuntimeException;
 
 function makeRetryPgSqlConnection(
     ScriptedPdo $pdo,
+    ?TransactionBackoff $backoff = null,
 ): PgSqlConnection {
     $config = DatabaseConfig::fromArray([
         'driver' => 'pgsql',
@@ -28,13 +34,14 @@ function makeRetryPgSqlConnection(
         'password' => 'test',
     ]);
 
-    return new class ($config, $pdo) extends PgSqlConnection
+    return new class ($config, $pdo, $backoff ?? new TransactionBackoff()) extends PgSqlConnection
     {
         public function __construct(
             DatabaseConfig $config,
             private readonly ScriptedPdo $scriptedPdo,
+            TransactionBackoff $backoff,
         ) {
-            parent::__construct($config);
+            parent::__construct($config, transactionBackoff: $backoff);
         }
 
         protected function createPdo(
@@ -338,6 +345,147 @@ describe('PgSqlConnection::transaction() retries', function (): void {
             ->and($conflict)->toBeInstanceOf(TransactionConflictException::class)
             ->and($conflict?->getPrevious())->toBeInstanceOf(PDOException::class)
             ->and(fn () => $connection->commit())->toThrow(QueryException::class, 'server closed the connection')
+            ->and($connection->transactionLevel())->toBe(0);
+    });
+});
+
+/**
+ * Runs a transaction whose first $conflicts attempts fail with a deadlock.
+ */
+function runPgSqlConflictingTransaction(
+    PgSqlConnection $connection,
+    int $conflicts,
+    int $attempts,
+    int|Closure|null $backoff = null,
+): int {
+    $calls = 0;
+
+    return $connection->transaction(function () use (&$calls, $conflicts): int {
+        if (++$calls <= $conflicts) {
+            throw pgsqlDeadlock();
+        }
+
+        return $calls;
+    }, attempts: $attempts, backoff: $backoff);
+}
+
+describe('PgSqlConnection::transaction() backoff', function (): void {
+    it('waits the default jittered exponential delay between attempts', function (): void {
+        $sleeper = new FakeSleeper();
+        $connection = makeRetryPgSqlConnection(
+            new ScriptedPdo(),
+            new TransactionBackoff($sleeper, new Randomizer(new Mt19937(11))),
+        );
+        $reference = new Randomizer(new Mt19937(11));
+
+        $result = runPgSqlConflictingTransaction($connection, conflicts: 3, attempts: 4);
+
+        expect($result)->toBe(4)
+            ->and($sleeper->sleeps)->toBe(
+                [$reference->getInt(0, 10), $reference->getInt(0, 20), $reference->getInt(0, 40)],
+            );
+    });
+
+    it('retries immediately when backoff is zero', function (): void {
+        $sleeper = new FakeSleeper();
+        $connection = makeRetryPgSqlConnection(new ScriptedPdo(), new TransactionBackoff($sleeper));
+
+        $result = runPgSqlConflictingTransaction($connection, conflicts: 2, attempts: 3, backoff: 0);
+
+        expect($result)->toBe(3)
+            ->and($sleeper->sleeps)->toBe([0, 0]);
+    });
+
+    it('waits a fixed delay when backoff is an int', function (): void {
+        $sleeper = new FakeSleeper();
+        $connection = makeRetryPgSqlConnection(new ScriptedPdo(), new TransactionBackoff($sleeper));
+
+        runPgSqlConflictingTransaction($connection, conflicts: 2, attempts: 3, backoff: 75);
+
+        expect($sleeper->sleeps)->toBe([75, 75]);
+    });
+
+    it('waits the delay a closure returns', function (): void {
+        $sleeper = new FakeSleeper();
+        $connection = makeRetryPgSqlConnection(new ScriptedPdo(), new TransactionBackoff($sleeper));
+        $seen = [];
+
+        runPgSqlConflictingTransaction(
+            $connection,
+            conflicts: 2,
+            attempts: 3,
+            backoff: function (int $attempt, TransactionConflictException $conflict) use (&$seen): int {
+                $seen[] = $conflict::class;
+
+                return $attempt * 30;
+            },
+        );
+
+        expect($sleeper->sleeps)->toBe([30, 60])
+            ->and($seen)->toBe([DeadlockException::class, DeadlockException::class]);
+    });
+
+    it('waits before retrying a conflict raised by COMMIT', function (): void {
+        $pdo = new ScriptedPdo();
+        $pdo->commitFailures[] = pgsqlCommitFailure('40001', 'ERROR:  could not serialize access');
+        $sleeper = new FakeSleeper();
+        $connection = makeRetryPgSqlConnection($pdo, new TransactionBackoff($sleeper));
+
+        $connection->transaction(fn (): bool => true, attempts: 2, backoff: 15);
+
+        expect($sleeper->sleeps)->toBe([15])
+            ->and($pdo->statements)->toBe(['BEGIN', 'COMMIT', 'ROLLBACK', 'BEGIN', 'COMMIT']);
+    });
+
+    it('never sleeps when attempts is one', function (): void {
+        $sleeper = new FakeSleeper();
+        $connection = makeRetryPgSqlConnection(new ScriptedPdo(), new TransactionBackoff($sleeper));
+
+        expect(fn () => runPgSqlConflictingTransaction($connection, conflicts: 1, attempts: 1, backoff: 50))
+            ->toThrow(DeadlockException::class)
+            ->and($sleeper->sleeps)->toBe([]);
+    });
+
+    it('never sleeps in a nested transaction', function (): void {
+        $sleeper = new FakeSleeper();
+        $connection = makeRetryPgSqlConnection(new ScriptedPdo(), new TransactionBackoff($sleeper));
+        $innerSleeps = null;
+
+        $connection->transaction(function () use ($connection, $sleeper, &$innerSleeps): void {
+            try {
+                runPgSqlConflictingTransaction($connection, conflicts: 1, attempts: 5, backoff: 40);
+            } catch (DeadlockException) {
+                $innerSleeps = $sleeper->sleeps;
+            }
+        }, attempts: 3, backoff: 40);
+
+        expect($innerSleeps)->toBe([])
+            ->and($sleeper->sleeps)->toBe([]);
+    });
+
+    it('never sleeps after the final failed attempt', function (): void {
+        $sleeper = new FakeSleeper();
+        $connection = makeRetryPgSqlConnection(new ScriptedPdo(), new TransactionBackoff($sleeper));
+
+        expect(fn () => runPgSqlConflictingTransaction($connection, conflicts: 3, attempts: 3, backoff: 20))
+            ->toThrow(DeadlockException::class)
+            ->and($sleeper->sleeps)->toBe([20, 20]);
+    });
+
+    it('rejects a negative backoff before beginning the transaction', function (): void {
+        $pdo = new ScriptedPdo();
+        $connection = makeRetryPgSqlConnection($pdo, new TransactionBackoff(new FakeSleeper()));
+        $calls = 0;
+
+        $run = function () use ($connection, &$calls): void {
+            $connection->transaction(function () use (&$calls): void {
+                $calls++;
+            }, attempts: 3, backoff: -10);
+        };
+
+        expect($run)->toThrow(TransactionException::class, 'A transaction backoff cannot be negative')
+            ->and($calls)->toBe(0)
+            ->and($pdo->statements)->toBe([])
             ->and($connection->transactionLevel())->toBe(0);
     });
 });

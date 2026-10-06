@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Tests\Query;
 
+use Closure;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
@@ -104,6 +105,7 @@ class RecordingTransactionalConnection implements ConnectionInterface, Transacti
     public function transaction(
         callable $callback,
         int $attempts = 1,
+        int|Closure|null $backoff = null,
     ): mixed {
         return $callback();
     }
