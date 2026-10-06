@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Tests\Integration;
 
-use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Exceptions\CheckConstraintViolationException;
 use Marko\Database\Exceptions\ForeignKeyConstraintViolationException;
 use Marko\Database\Exceptions\NotNullConstraintViolationException;
@@ -14,32 +13,21 @@ use Marko\Database\PgSql\Tests\Fixtures\Constraint\ConstraintPost;
 use Marko\Database\PgSql\Tests\Fixtures\Constraint\ConstraintPostRepository;
 use Marko\Database\PgSql\Tests\Fixtures\Constraint\ConstraintUser;
 use Marko\Database\PgSql\Tests\Fixtures\Constraint\ConstraintUserRepository;
+use Marko\Database\PgSql\Tests\Fixtures\IntegrationDatabase;
 use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\SharedConnectionContainer;
 use PDOException;
 use Throwable;
 
-/**
+/*
  * Runs against a real PostgreSQL server. Set MARKO_TEST_PGSQL_HOST (and
  * optionally MARKO_TEST_PGSQL_PORT, _DATABASE, _USERNAME, _PASSWORD) to
  * enable; the tests skip otherwise. The tests create and drop the
  * constraint_users and constraint_posts tables.
+ *
+ * Settings come from tests/Fixtures/IntegrationDatabase. With
+ * MARKO_INTEGRATION_REQUIRED set (CI), a missing host fails instead of
+ * skipping. Part of the integration-services group.
  */
-function pgsqlConstraintConfig(): ?DatabaseConfig
-{
-    $host = getenv('MARKO_TEST_PGSQL_HOST');
-
-    if ($host === false || $host === '') {
-        return null;
-    }
-
-    return SharedConnectionContainer::config(
-        host: $host,
-        port: (int) (getenv('MARKO_TEST_PGSQL_PORT') ?: 5432),
-        database: getenv('MARKO_TEST_PGSQL_DATABASE') ?: 'marko_test',
-        username: getenv('MARKO_TEST_PGSQL_USERNAME') ?: 'postgres',
-        password: getenv('MARKO_TEST_PGSQL_PASSWORD') ?: '',
-    );
-}
 
 /**
  * Run the callback and return what it threw, or null.
@@ -56,13 +44,13 @@ function pgsqlConstraintCatch(
     return null;
 }
 
-const PGSQL_CONSTRAINT_SKIP_REASON = 'Set MARKO_TEST_PGSQL_HOST (and _PORT, _DATABASE, _USERNAME, _PASSWORD) to run against a real PostgreSQL server';
+pest()->group('integration-services');
 
 beforeEach(function (): void {
-    $config = pgsqlConstraintConfig();
+    $config = IntegrationDatabase::config();
 
     if ($config === null) {
-        return;
+        $this->markTestSkipped(IntegrationDatabase::SKIP_REASON);
     }
 
     $this->schema = new PgSqlConnection($config);
@@ -109,7 +97,7 @@ describe('PostgreSQL constraint violations', function (): void {
             ->and($exception->table())->toBe('constraint_users')
             ->and($exception->column())->toBe('email')
             ->and($exception->sqlState())->toBe('23505');
-    })->skip(fn (): bool => pgsqlConstraintConfig() === null, PGSQL_CONSTRAINT_SKIP_REASON)->group('integration');
+    });
 
     it('throws a foreign key violation when deleting a referenced row', function (): void {
         $user = pgsqlConstraintUser('author@example.com');
@@ -123,7 +111,7 @@ describe('PostgreSQL constraint violations', function (): void {
         expect($exception)->toBeInstanceOf(ForeignKeyConstraintViolationException::class)
             ->and($exception->constraintName())->toBe('constraint_posts_user_id_foreign')
             ->and($exception->table())->toBe('constraint_posts');
-    })->skip(fn (): bool => pgsqlConstraintConfig() === null, PGSQL_CONSTRAINT_SKIP_REASON)->group('integration');
+    });
 
     it('throws a foreign key violation when inserting a row with a missing parent', function (): void {
         $post = new ConstraintPost();
@@ -134,7 +122,7 @@ describe('PostgreSQL constraint violations', function (): void {
         expect($exception)->toBeInstanceOf(ForeignKeyConstraintViolationException::class)
             ->and($exception->constraintName())->toBe('constraint_posts_user_id_foreign')
             ->and($exception->table())->toBe('constraint_posts');
-    })->skip(fn (): bool => pgsqlConstraintConfig() === null, PGSQL_CONSTRAINT_SKIP_REASON)->group('integration');
+    });
 
     it('throws a not-null violation naming the column for a raw insert', function (): void {
         $exception = pgsqlConstraintCatch(
@@ -144,7 +132,7 @@ describe('PostgreSQL constraint violations', function (): void {
         expect($exception)->toBeInstanceOf(NotNullConstraintViolationException::class)
             ->and($exception->column())->toBe('email')
             ->and($exception->table())->toBe('constraint_users');
-    })->skip(fn (): bool => pgsqlConstraintConfig() === null, PGSQL_CONSTRAINT_SKIP_REASON)->group('integration');
+    });
 
     it('throws a check violation naming the constraint', function (): void {
         $post = new ConstraintPost();
@@ -155,7 +143,7 @@ describe('PostgreSQL constraint violations', function (): void {
         expect($exception)->toBeInstanceOf(CheckConstraintViolationException::class)
             ->and($exception->constraintName())->toBe('constraint_posts_user_id_positive')
             ->and($exception->table())->toBe('constraint_posts');
-    })->skip(fn (): bool => pgsqlConstraintConfig() === null, PGSQL_CONSTRAINT_SKIP_REASON)->group('integration');
+    });
 
     it('keeps the original PDOException as the previous exception', function (): void {
         $this->users->save(pgsqlConstraintUser('taken@example.com'));
@@ -164,7 +152,7 @@ describe('PostgreSQL constraint violations', function (): void {
 
         expect($exception?->getPrevious())->toBeInstanceOf(PDOException::class)
             ->and($exception?->getPrevious()?->getCode())->toBe('23505');
-    })->skip(fn (): bool => pgsqlConstraintConfig() === null, PGSQL_CONSTRAINT_SKIP_REASON)->group('integration');
+    });
 
     it('does not leak the duplicate value into the message', function (): void {
         $this->users->save(pgsqlConstraintUser('private@example.com'));
@@ -175,7 +163,7 @@ describe('PostgreSQL constraint violations', function (): void {
             ->and($exception->getMessage())->not->toContain('private@example.com')
             ->and($exception->getContext())->not->toContain('private@example.com')
             ->and($exception->getPrevious()?->getMessage())->toContain('private@example.com');
-    })->skip(fn (): bool => pgsqlConstraintConfig() === null, PGSQL_CONSTRAINT_SKIP_REASON)->group('integration');
+    });
 
     it('rethrows the typed violation from insertBatch with the PDOException as previous', function (): void {
         $this->users->save(pgsqlConstraintUser('taken@example.com'));
@@ -189,5 +177,5 @@ describe('PostgreSQL constraint violations', function (): void {
             ->and($exception->constraintName())->toBe('constraint_users_email_unique')
             ->and($exception->getPrevious())->toBeInstanceOf(PDOException::class)
             ->and((int) $this->schema->query('SELECT COUNT(*) AS total FROM constraint_users')[0]['total'])->toBe(1);
-    })->skip(fn (): bool => pgsqlConstraintConfig() === null, PGSQL_CONSTRAINT_SKIP_REASON)->group('integration');
+    });
 });

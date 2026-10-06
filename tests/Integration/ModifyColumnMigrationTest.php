@@ -4,39 +4,24 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Tests\Integration;
 
-use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Diff\DiffCalculator;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use Marko\Database\PgSql\Introspection\PgSqlIntrospector;
 use Marko\Database\PgSql\Sql\PgSqlGenerator;
-use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\SharedConnectionContainer;
+use Marko\Database\PgSql\Tests\Fixtures\IntegrationDatabase;
 use Marko\Database\Schema\Column;
 use Marko\Database\Schema\Table;
 
-/**
+/*
  * Runs against a real PostgreSQL server. Set MARKO_TEST_PGSQL_HOST (and
  * optionally MARKO_TEST_PGSQL_PORT, _DATABASE, _USERNAME, _PASSWORD) to
  * enable; the tests skip otherwise. The tests create and drop the
  * modify_column_posts table.
+ *
+ * Settings come from tests/Fixtures/IntegrationDatabase. With
+ * MARKO_INTEGRATION_REQUIRED set (CI), a missing host fails instead of
+ * skipping. Part of the integration-services group.
  */
-function pgsqlModifyColumnConfig(): ?DatabaseConfig
-{
-    $host = getenv('MARKO_TEST_PGSQL_HOST');
-
-    if ($host === false || $host === '') {
-        return null;
-    }
-
-    return SharedConnectionContainer::config(
-        host: $host,
-        port: (int) (getenv('MARKO_TEST_PGSQL_PORT') ?: 5432),
-        database: getenv('MARKO_TEST_PGSQL_DATABASE') ?: 'marko_test',
-        username: getenv('MARKO_TEST_PGSQL_USERNAME') ?: 'postgres',
-        password: getenv('MARKO_TEST_PGSQL_PASSWORD') ?: '',
-    );
-}
-
-const PGSQL_MODIFY_COLUMN_SKIP_REASON = 'Set MARKO_TEST_PGSQL_HOST (and _PORT, _DATABASE, _USERNAME, _PASSWORD) to run against a real PostgreSQL server';
 
 /**
  * The modify_column_posts table as an entity would declare it.
@@ -53,11 +38,13 @@ function pgsqlModifyColumnTable(
     );
 }
 
+pest()->group('integration-services');
+
 beforeEach(function (): void {
-    $config = pgsqlModifyColumnConfig();
+    $config = IntegrationDatabase::config();
 
     if ($config === null) {
-        return;
+        $this->markTestSkipped(IntegrationDatabase::SKIP_REASON);
     }
 
     $this->connection = new PgSqlConnection($config);
@@ -104,7 +91,7 @@ describe('PostgreSQL column modification migrations', function (): void {
         expect($diff->isEmpty())->toBeFalse()
             ->and(($this->diffAgainst)($entityTable)->isEmpty())->toBeTrue()
             ->and($this->introspector->getTable('modify_column_posts')->columns[1]->default)->toBe('live');
-    })->skip(fn (): bool => pgsqlModifyColumnConfig() === null, PGSQL_MODIFY_COLUMN_SKIP_REASON)->group('integration');
+    });
 
     it('yields an empty diff after applying a generated nullability change', function (): void {
         $entityTable = pgsqlModifyColumnTable(
@@ -118,7 +105,7 @@ describe('PostgreSQL column modification migrations', function (): void {
         expect($diff->isEmpty())->toBeFalse()
             ->and(($this->diffAgainst)($entityTable)->isEmpty())->toBeTrue()
             ->and($this->introspector->getTable('modify_column_posts')->columns[2]->nullable)->toBeFalse();
-    })->skip(fn (): bool => pgsqlModifyColumnConfig() === null, PGSQL_MODIFY_COLUMN_SKIP_REASON)->group('integration');
+    });
 
     it('keeps the database default when the entity declares none and only nullability changes', function (): void {
         $entityTable = pgsqlModifyColumnTable(
@@ -134,7 +121,7 @@ describe('PostgreSQL column modification migrations', function (): void {
             ->and(($this->diffAgainst)($entityTable)->isEmpty())->toBeTrue()
             ->and($status->nullable)->toBeTrue()
             ->and($status->default)->toBe('draft');
-    })->skip(fn (): bool => pgsqlModifyColumnConfig() === null, PGSQL_MODIFY_COLUMN_SKIP_REASON)->group('integration');
+    });
 
     it('restores the original columns when the down migration runs', function (): void {
         $entityTable = pgsqlModifyColumnTable(
@@ -147,5 +134,5 @@ describe('PostgreSQL column modification migrations', function (): void {
         ($this->run)($this->generator->generateDown($diff));
 
         expect(($this->diffAgainst)($this->original)->isEmpty())->toBeTrue();
-    })->skip(fn (): bool => pgsqlModifyColumnConfig() === null, PGSQL_MODIFY_COLUMN_SKIP_REASON)->group('integration');
+    });
 });

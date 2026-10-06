@@ -4,37 +4,24 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Tests\Integration;
 
-use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Exceptions\LockTimeoutException;
 use Marko\Database\Exceptions\QueryException;
 use Marko\Database\Exceptions\UniqueConstraintViolationException;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use Marko\Database\PgSql\Query\PgSqlQueryBuilder;
-use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\SharedConnectionContainer;
+use Marko\Database\PgSql\Tests\Fixtures\IntegrationDatabase;
 use RuntimeException;
 
-/**
+/*
  * Savepoints, after-commit callbacks, row locks and upsert against a real
  * PostgreSQL server. Uses the same MARKO_TEST_PGSQL_* variables as
  * SharedConnectionTransactionTest and skips when they are unset. Creates and
  * drops the primitives_items table.
+ *
+ * Settings come from tests/Fixtures/IntegrationDatabase. With
+ * MARKO_INTEGRATION_REQUIRED set (CI), a missing host fails instead of
+ * skipping. Part of the integration-services group.
  */
-function pgsqlPrimitivesConfig(): ?DatabaseConfig
-{
-    $host = getenv('MARKO_TEST_PGSQL_HOST');
-
-    if ($host === false || $host === '') {
-        return null;
-    }
-
-    return SharedConnectionContainer::config(
-        host: $host,
-        port: (int) (getenv('MARKO_TEST_PGSQL_PORT') ?: 5432),
-        database: getenv('MARKO_TEST_PGSQL_DATABASE') ?: 'marko_test',
-        username: getenv('MARKO_TEST_PGSQL_USERNAME') ?: 'postgres',
-        password: getenv('MARKO_TEST_PGSQL_PASSWORD') ?: '',
-    );
-}
 
 /**
  * @return list<string>
@@ -53,14 +40,14 @@ function pgsqlInsertItem(
     $connection->execute('INSERT INTO primitives_items (id, name) VALUES (?, ?)', [$id, $name]);
 }
 
-pest()->group('integration');
+pest()->group('integration-services');
 
 beforeEach(function (): void {
-    $config = pgsqlPrimitivesConfig();
+    $config = IntegrationDatabase::config();
 
     if ($config === null) {
         $this->markTestSkipped(
-            'Set MARKO_TEST_PGSQL_HOST (and _PORT, _DATABASE, _USERNAME, _PASSWORD) to run against a real PostgreSQL server',
+            IntegrationDatabase::SKIP_REASON,
         );
     }
 

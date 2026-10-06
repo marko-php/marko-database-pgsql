@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Tests\Integration;
 
-use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
+use Marko\Database\PgSql\Tests\Fixtures\IntegrationDatabase;
 use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\Account;
 use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\AccountRepository;
 use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\AuditEntry;
@@ -14,41 +14,29 @@ use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\AuditEntryRepository;
 use Marko\Database\PgSql\Tests\Fixtures\SharedConnection\SharedConnectionContainer;
 use RuntimeException;
 
-/**
+/*
  * Runs against a real PostgreSQL server. Set MARKO_TEST_PGSQL_HOST (and
  * optionally MARKO_TEST_PGSQL_PORT, _DATABASE, _USERNAME, _PASSWORD) to
  * enable; the tests skip otherwise. The tests create and drop the
  * shared_accounts and shared_audit_entries tables.
+ *
+ * Settings come from tests/Fixtures/IntegrationDatabase. With
+ * MARKO_INTEGRATION_REQUIRED set (CI), a missing host fails instead of
+ * skipping. Part of the integration-services group.
  */
-function pgsqlIntegrationConfig(): ?DatabaseConfig
-{
-    $host = getenv('MARKO_TEST_PGSQL_HOST');
-
-    if ($host === false || $host === '') {
-        return null;
-    }
-
-    return SharedConnectionContainer::config(
-        host: $host,
-        port: (int) (getenv('MARKO_TEST_PGSQL_PORT') ?: 5432),
-        database: getenv('MARKO_TEST_PGSQL_DATABASE') ?: 'marko_test',
-        username: getenv('MARKO_TEST_PGSQL_USERNAME') ?: 'postgres',
-        password: getenv('MARKO_TEST_PGSQL_PASSWORD') ?: '',
-    );
-}
 
 function pgsqlRowCount(PgSqlConnection $connection, string $table): int
 {
     return (int) $connection->query("SELECT COUNT(*) AS total FROM $table")[0]['total'];
 }
 
-const PGSQL_SKIP_REASON = 'Set MARKO_TEST_PGSQL_HOST (and _PORT, _DATABASE, _USERNAME, _PASSWORD) to run against a real PostgreSQL server';
+pest()->group('integration-services');
 
 beforeEach(function (): void {
-    $config = pgsqlIntegrationConfig();
+    $config = IntegrationDatabase::config();
 
     if ($config === null) {
-        return;
+        $this->markTestSkipped(IntegrationDatabase::SKIP_REASON);
     }
 
     $this->observer = new PgSqlConnection($config);
@@ -68,7 +56,7 @@ afterEach(function (): void {
 
 describe('PostgreSQL transactions across repositories', function (): void {
     it('rolls back writes from two repositories when the transaction callback throws', function (): void {
-        $container = SharedConnectionContainer::build(pgsqlIntegrationConfig());
+        $container = SharedConnectionContainer::build(IntegrationDatabase::config());
         $accounts = $container->get(AccountRepository::class);
         $auditEntries = $container->get(AuditEntryRepository::class);
 
@@ -89,10 +77,10 @@ describe('PostgreSQL transactions across repositories', function (): void {
         expect($run)->toThrow(RuntimeException::class, 'Payment declined')
             ->and(pgsqlRowCount($this->observer, 'shared_accounts'))->toBe(0)
             ->and(pgsqlRowCount($this->observer, 'shared_audit_entries'))->toBe(0);
-    })->skip(fn (): bool => pgsqlIntegrationConfig() === null, PGSQL_SKIP_REASON)->group('integration');
+    });
 
     it('commits writes from two repositories when the transaction callback succeeds', function (): void {
-        $container = SharedConnectionContainer::build(pgsqlIntegrationConfig());
+        $container = SharedConnectionContainer::build(IntegrationDatabase::config());
         $accounts = $container->get(AccountRepository::class);
         $auditEntries = $container->get(AuditEntryRepository::class);
 
@@ -110,5 +98,5 @@ describe('PostgreSQL transactions across repositories', function (): void {
 
         expect(pgsqlRowCount($this->observer, 'shared_accounts'))->toBe(1)
             ->and(pgsqlRowCount($this->observer, 'shared_audit_entries'))->toBe(1);
-    })->skip(fn (): bool => pgsqlIntegrationConfig() === null, PGSQL_SKIP_REASON)->group('integration');
+    });
 });
