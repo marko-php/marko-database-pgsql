@@ -1075,6 +1075,130 @@ describe('PgSqlGenerator auto-increment sequence type changes', function (): voi
         expect($statement)->toContain("pg_get_serial_sequence('\"o''brien\"', 'o''id')")
             ->and($statement)->toContain('Column "o\'\'id" of table "o\'\'brien"');
     });
+
+    it('dollar-quotes the sequence DO block with a tag that does not occur in its body', function (): void {
+        $statement = $this->generator->generateUp(new SchemaDiff(tablesToAlter: [
+            'pri$$ces' => new TableDiff(
+                tableName: 'pri$$ces',
+                columnsToModify: [
+                    'i$$d' => new Column(name: 'i$$d', type: 'bigint', primaryKey: true, autoIncrement: true),
+                ],
+                columnsToModifyFrom: [
+                    'i$$d' => new Column(name: 'i$$d', type: 'integer', primaryKey: true, autoIncrement: true),
+                ],
+            ),
+        ]))[0];
+
+        $body = substr($statement, strlen("DO \$marko\$\n"), -strlen("\n\$marko\$"));
+
+        expect($statement)->toStartWith("DO \$marko\$\n")
+            ->and($statement)->toEndWith("\n\$marko\$")
+            ->and($body)->toContain('ALTER TABLE "pri$$ces" ALTER COLUMN "i$$d" TYPE BIGINT')
+            ->and($body)->not->toContain('$marko$');
+    });
+
+    it('picks another tag when a name contains the default tag', function (): void {
+        $statement = $this->generator->generateUp(new SchemaDiff(tablesToAlter: [
+            'a$$b$marko$c' => new TableDiff(
+                tableName: 'a$$b$marko$c',
+                columnsToModify: [
+                    'id' => new Column(name: 'id', type: 'bigint', primaryKey: true, autoIncrement: true),
+                ],
+                columnsToModifyFrom: [
+                    'id' => new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
+                ],
+            ),
+        ]))[0];
+
+        expect($statement)->toStartWith("DO \$marko_1\$\n")
+            ->and($statement)->toEndWith("\n\$marko_1\$")
+            ->and(substr_count($statement, '$marko_1$'))->toBe(2);
+    });
+});
+
+describe('PgSqlGenerator identifier quoting', function (): void {
+    beforeEach(function (): void {
+        $this->generator = new PgSqlGenerator();
+    });
+
+    it('escapes a double quote in a table name in CREATE TABLE', function (): void {
+        $sql = $this->generator->generateCreateTable(new Table(
+            name: 'we"ird',
+            columns: [new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true)],
+        ));
+
+        expect($sql)->toStartWith('CREATE TABLE "we""ird" (')
+            ->and($this->generator->generateDropTable('we"ird'))->toBe('DROP TABLE "we""ird"');
+    });
+
+    it('escapes a double quote in column, index, constraint and referenced names', function (): void {
+        $foreignKey = $this->generator->generateAddForeignKey('posts', new ForeignKey(
+            name: 'fk"a',
+            columns: ['user"id'],
+            referencedTable: 'us"ers',
+            referencedColumns: ['i"d'],
+        ));
+
+        expect($this->generator->generateAddColumn('posts', new Column(name: 'ti"tle', type: 'string')))
+            ->toStartWith('ALTER TABLE "posts" ADD COLUMN "ti""tle" VARCHAR(255)')
+            ->and($this->generator->generateDropColumn('posts', 'ti"tle'))
+            ->toBe('ALTER TABLE "posts" DROP COLUMN "ti""tle"')
+            ->and($this->generator->generateAddIndex('posts', new Index(name: 'idx"a', columns: ['col"a'])))
+            ->toBe('CREATE INDEX "idx""a" ON "posts" ("col""a")')
+            ->and($this->generator->generateAddIndex(
+                'posts',
+                new Index(name: 'uq"a', columns: ['col"a'], type: IndexType::Unique, constraint: true),
+            ))
+            ->toBe('ALTER TABLE "posts" ADD CONSTRAINT "uq""a" UNIQUE ("col""a")')
+            ->and($this->generator->generateDropIndex('posts', 'idx"a'))->toBe('DROP INDEX "idx""a"')
+            ->and($foreignKey)->toBe(
+                'ALTER TABLE "posts" ADD CONSTRAINT "fk""a" FOREIGN KEY ("user""id") REFERENCES "us""ers" ("i""d")',
+            )
+            ->and($this->generator->generateDropForeignKey('posts', 'fk"a'))
+            ->toBe('ALTER TABLE "posts" DROP CONSTRAINT "fk""a"');
+    });
+
+    it('escapes a double quote in ALTER COLUMN statements', function (): void {
+        $sql = $this->generator->generateModifyColumn(
+            'po"sts',
+            new Column(name: 'vi"ews', type: 'bigint', nullable: true, default: 0),
+            new Column(name: 'vi"ews', type: 'integer'),
+        );
+
+        expect($sql)->toBe(
+            'ALTER TABLE "po""sts" ALTER COLUMN "vi""ews" TYPE BIGINT USING "vi""ews"::BIGINT, '
+            . 'ALTER COLUMN "vi""ews" DROP NOT NULL, ALTER COLUMN "vi""ews" SET DEFAULT 0',
+        );
+    });
+
+    it('quotes reserved-word and mixed-case columns in generated DDL', function (): void {
+        $sql = $this->generator->generateCreateTable(new Table(
+            name: 'permissions',
+            columns: [
+                new Column(name: 'key', type: 'string'),
+                new Column(name: 'group', type: 'string'),
+                new Column(name: 'sortOrder', type: 'integer'),
+            ],
+        ));
+
+        expect($sql)->toContain('"key" VARCHAR(255) NOT NULL')
+            ->and($sql)->toContain('"group" VARCHAR(255) NOT NULL')
+            ->and($sql)->toContain('"sortOrder" INTEGER NOT NULL');
+    });
+
+    it(
+        'has no inline double-quote identifier quoting in the generator, query builder or introspector',
+        function (): void {
+            $source = dirname(__DIR__, 2) . '/src';
+
+            foreach (['Sql/PgSqlGenerator.php', 'Query/PgSqlQueryBuilder.php', 'Introspection/PgSqlIntrospector.php'] as $file) {
+                $code = (string) file_get_contents("$source/$file");
+
+                // An escaped double quote around an interpolation, or a double-quote string literal concatenated onto a name
+                expect(preg_match('/\\\\"\$|\'"\'\s*\.|\.\s*\'"\'/', $code))->toBe(0, "$file quotes an identifier inline");
+            }
+        },
+    );
 });
 
 describe('PgSqlGenerator derived names over 63 bytes', function (): void {

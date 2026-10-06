@@ -18,6 +18,7 @@ use Marko\Database\Exceptions\QueryException;
 use Marko\Database\Exceptions\TransactionConflictException;
 use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\PgSql\Exceptions\ConnectionException;
+use Marko\Database\PgSql\Sql\PgSqlIdentifier;
 use Override;
 use PDO;
 use PDOException;
@@ -288,6 +289,12 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
     public function supportsReturning(): bool
     {
         return true;
+    }
+
+    public function quoteIdentifier(
+        string $identifier,
+    ): string {
+        return PgSqlIdentifier::quote($identifier);
     }
 
     /**

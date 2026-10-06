@@ -82,6 +82,12 @@ class RecordingTransactionalConnection implements ConnectionInterface, Transacti
         return true;
     }
 
+    public function quoteIdentifier(
+        string $identifier,
+    ): string {
+        return '"' . str_replace('"', '""', $identifier) . '"';
+    }
+
     public function beginTransaction(): void
     {
         $this->open = true;

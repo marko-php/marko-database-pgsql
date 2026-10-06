@@ -90,6 +90,12 @@ class ProbeRecordingConnection implements ConnectionInterface, TransactionInterf
         return true;
     }
 
+    public function quoteIdentifier(
+        string $identifier,
+    ): string {
+        return '"' . str_replace('"', '""', $identifier) . '"';
+    }
+
     public function beginTransaction(): void
     {
         $this->log[] = 'BEGIN';

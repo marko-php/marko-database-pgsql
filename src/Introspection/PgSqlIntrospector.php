@@ -11,6 +11,7 @@ use Marko\Database\Exceptions\MigrationException;
 use Marko\Database\Exceptions\QueryException;
 use Marko\Database\Introspection\ExpressionDefaultMatcherInterface;
 use Marko\Database\Introspection\IntrospectorInterface;
+use Marko\Database\PgSql\Sql\PgSqlIdentifier;
 use Marko\Database\Schema\Column;
 use Marko\Database\Schema\Expression;
 use Marko\Database\Schema\ForeignKey;
@@ -283,7 +284,7 @@ readonly class PgSqlIntrospector implements IntrospectorInterface, ExpressionDef
     private function quoteIdentifier(
         string $identifier,
     ): string {
-        return '"' . str_replace('"', '""', $identifier) . '"';
+        return PgSqlIdentifier::quote($identifier);
     }
 
     public function getIndexes(

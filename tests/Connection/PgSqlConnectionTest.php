@@ -208,6 +208,15 @@ describe('PgSqlConnection', function (): void {
             ->and($connection->isConnected())->toBeFalse();
     });
 
+    it('quotes identifiers with double quotes without connecting', function (): void {
+        $connection = new PgSqlConnection(createTestPgSqlConfig());
+
+        expect($connection->quoteIdentifier('group'))->toBe('"group"')
+            ->and($connection->quoteIdentifier('permissions.createdAt'))->toBe('"permissions"."createdAt"')
+            ->and($connection->quoteIdentifier('we"ird'))->toBe('"we""ird"')
+            ->and($connection->isConnected())->toBeFalse();
+    });
+
     it('constructs proper PostgreSQL DSN from config', function (): void {
         $config = createTestPgSqlConfig(
             host: 'db.example.com',

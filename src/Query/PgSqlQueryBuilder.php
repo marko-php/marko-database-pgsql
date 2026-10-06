@@ -11,6 +11,7 @@ use Marko\Database\Exceptions\LockException;
 use Marko\Database\Exceptions\UnionShapeMismatchException;
 use Marko\Database\Exceptions\UpsertException;
 use Marko\Database\PgSql\Exceptions\InsertReturningException;
+use Marko\Database\PgSql\Sql\PgSqlIdentifier;
 use Marko\Database\Query\IdentifierValidator;
 use Marko\Database\Query\JsonPathParser;
 use Marko\Database\Query\QueryBuilderInterface;
@@ -784,23 +785,16 @@ class PgSqlQueryBuilder implements QueryBuilderInterface
         return $this->connection->execute($sql, $bindings);
     }
 
+    /**
+     * Quote a database identifier through the driver's one quoting rule, PgSqlIdentifier.
+     *
+     * @param string $identifier The identifier to quote
+     * @return string The quoted identifier
+     */
     protected function quoteIdentifier(
         string $identifier,
     ): string {
-        // Handle table.column format
-        if (str_contains($identifier, '.')) {
-            $parts = explode('.', $identifier);
-
-            return implode(
-                '.',
-                array_map(
-                    fn (string $part): string => '"' . IdentifierValidator::escapeDelimiter($part, '"') . '"',
-                    $parts,
-                ),
-            );
-        }
-
-        return '"' . IdentifierValidator::escapeDelimiter($identifier, '"') . '"';
+        return PgSqlIdentifier::quote($identifier);
     }
 
     /**

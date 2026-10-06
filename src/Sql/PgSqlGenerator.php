@@ -125,13 +125,13 @@ class PgSqlGenerator implements SqlGeneratorInterface
 
         $columnsSql = implode(",\n    ", $columns);
 
-        return "CREATE TABLE \"$table->name\" (\n    $columnsSql\n)";
+        return 'CREATE TABLE ' . $this->quote($table->name) . " (\n    $columnsSql\n)";
     }
 
     public function generateDropTable(
         string $tableName,
     ): string {
-        return "DROP TABLE \"$tableName\"";
+        return 'DROP TABLE ' . $this->quote($tableName);
     }
 
     public function generateAddColumn(
@@ -140,14 +140,14 @@ class PgSqlGenerator implements SqlGeneratorInterface
     ): string {
         $definition = $this->generateColumnDefinition($column, forAlter: true);
 
-        return "ALTER TABLE \"$table\" ADD COLUMN $definition";
+        return 'ALTER TABLE ' . $this->quote($table) . " ADD COLUMN $definition";
     }
 
     public function generateDropColumn(
         string $table,
         string $columnName,
     ): string {
-        return "ALTER TABLE \"$table\" DROP COLUMN \"$columnName\"";
+        return 'ALTER TABLE ' . $this->quote($table) . ' DROP COLUMN ' . $this->quote($columnName);
     }
 
     /**
@@ -174,7 +174,8 @@ class PgSqlGenerator implements SqlGeneratorInterface
         if ($index->constraint) {
             $constraintColumns = implode(', ', $this->quoteIdentifiers($index->columns));
 
-            return "ALTER TABLE \"$table\" ADD CONSTRAINT \"$index->name\" UNIQUE ($constraintColumns)";
+            return 'ALTER TABLE ' . $this->quote($table) . ' ADD CONSTRAINT ' . $this->quote($index->name)
+                . " UNIQUE ($constraintColumns)";
         }
 
         $unique = $index->type === IndexType::Unique ? 'UNIQUE ' : '';
@@ -183,7 +184,8 @@ class PgSqlGenerator implements SqlGeneratorInterface
 
         $whereSql = $index->where !== null ? " WHERE $index->where" : '';
 
-        return "CREATE {$unique}INDEX \"$index->name\" ON \"$table\" ($columnsSql)$whereSql";
+        return "CREATE {$unique}INDEX " . $this->quote($index->name) . ' ON ' . $this->quote($table)
+            . " ($columnsSql)$whereSql";
     }
 
     public function generateDropIndex(
@@ -191,7 +193,7 @@ class PgSqlGenerator implements SqlGeneratorInterface
         string $indexName,
     ): string {
         // PostgreSQL indexes are not table-scoped, so we don't need the table name
-        return "DROP INDEX \"$indexName\"";
+        return 'DROP INDEX ' . $this->quote($indexName);
     }
 
     public function generateAddForeignKey(
@@ -204,9 +206,9 @@ class PgSqlGenerator implements SqlGeneratorInterface
         $referencedColumns = $this->quoteIdentifiers($foreignKey->referencedColumns);
         $referencedColumnsSql = implode(', ', $referencedColumns);
 
-        $sql = "ALTER TABLE \"$table\" ADD CONSTRAINT \"$foreignKey->name\" ";
+        $sql = 'ALTER TABLE ' . $this->quote($table) . ' ADD CONSTRAINT ' . $this->quote($foreignKey->name) . ' ';
         $sql .= "FOREIGN KEY ($columnsSql) ";
-        $sql .= "REFERENCES \"$foreignKey->referencedTable\" ($referencedColumnsSql)";
+        $sql .= 'REFERENCES ' . $this->quote($foreignKey->referencedTable) . " ($referencedColumnsSql)";
 
         if ($foreignKey->onDelete !== null) {
             $sql .= " ON DELETE $foreignKey->onDelete";
@@ -223,7 +225,7 @@ class PgSqlGenerator implements SqlGeneratorInterface
         string $table,
         string $keyName,
     ): string {
-        return "ALTER TABLE \"$table\" DROP CONSTRAINT \"$keyName\"";
+        return 'ALTER TABLE ' . $this->quote($table) . ' DROP CONSTRAINT ' . $this->quote($keyName);
     }
 
     /**
@@ -236,7 +238,7 @@ class PgSqlGenerator implements SqlGeneratorInterface
         Column $column,
         bool $forAlter = false,
     ): string {
-        $parts = ["\"$column->name\""];
+        $parts = [$this->quote($column->name)];
 
         // Handle auto-increment with SERIAL types
         if ($column->autoIncrement) {
@@ -345,7 +347,7 @@ class PgSqlGenerator implements SqlGeneratorInterface
         array $identifiers,
     ): array {
         return array_map(
-            static fn (string $identifier): string => "\"$identifier\"",
+            fn (string $identifier): string => $this->quote($identifier),
             $identifiers,
         );
     }
@@ -405,7 +407,7 @@ class PgSqlGenerator implements SqlGeneratorInterface
         Index $index,
     ): string {
         return $index->constraint
-            ? "ALTER TABLE \"$table\" DROP CONSTRAINT \"$index->name\""
+            ? 'ALTER TABLE ' . $this->quote($table) . ' DROP CONSTRAINT ' . $this->quote($index->name)
             : $this->generateDropIndex($table, $index->name);
     }
 
@@ -516,39 +518,40 @@ class PgSqlGenerator implements SqlGeneratorInterface
         // The old default goes before the type changes, so one that cannot be cast to the new type never
         // blocks the migration; the target default is set again after it
         $dropsDefaultForType = $typeChanges && $manageDefault && $oldColumn->default !== null;
+        $columnName = $this->quote($column->name);
 
         if ($dropsDefaultForType) {
-            $alterations[] = "ALTER COLUMN \"$column->name\" DROP DEFAULT";
+            $alterations[] = "ALTER COLUMN $columnName DROP DEFAULT";
         }
 
         if ($typeChanges) {
             // An explicit cast: PostgreSQL applies only an assignment cast without USING, which refuses
             // conversions such as varchar to integer
-            $alterations[] = "ALTER COLUMN \"$column->name\" TYPE $newType USING \"$column->name\"::$newType";
+            $alterations[] = "ALTER COLUMN $columnName TYPE $newType USING $columnName::$newType";
         }
 
         // A primary key column is always NOT NULL, whatever the PHP property allows
         if ($column->nullable !== $oldColumn->nullable && !$column->primaryKey) {
             $nullability = $column->nullable ? 'DROP NOT NULL' : 'SET NOT NULL';
-            $alterations[] = "ALTER COLUMN \"$column->name\" $nullability";
+            $alterations[] = "ALTER COLUMN $columnName $nullability";
         }
 
         if ($dropsDefaultForType) {
             if ($column->default !== null) {
-                $alterations[] = "ALTER COLUMN \"$column->name\" SET DEFAULT "
+                $alterations[] = "ALTER COLUMN $columnName SET DEFAULT "
                     . $this->formatDefaultValue($column->default);
             }
         } elseif ($manageDefault && !$column->hasSameDefaultAs($oldColumn)) {
             $alterations[] = $column->default === null
-                ? "ALTER COLUMN \"$column->name\" DROP DEFAULT"
-                : "ALTER COLUMN \"$column->name\" SET DEFAULT " . $this->formatDefaultValue($column->default);
+                ? "ALTER COLUMN $columnName DROP DEFAULT"
+                : "ALTER COLUMN $columnName SET DEFAULT " . $this->formatDefaultValue($column->default);
         }
 
         if ($alterations === []) {
             return null;
         }
 
-        $alterTable = "ALTER TABLE \"$table\" " . implode(', ', $alterations);
+        $alterTable = 'ALTER TABLE ' . $this->quote($table) . ' ' . implode(', ', $alterations);
 
         if ($typeChanges && $column->autoIncrement && in_array($newType, self::SEQUENCE_TYPES, true)) {
             return $this->generateSequenceFollowingTypeChange($table, $column->name, $newType, $alterTable);
@@ -572,16 +575,19 @@ class PgSqlGenerator implements SqlGeneratorInterface
         string $sequenceType,
         string $alterTable,
     ): string {
-        $tableLiteral = $this->quoteStringLiteral("\"$table\"");
+        $quotedTable = $this->quote($table);
+        $quotedColumn = $this->quote($columnName);
+        // pg_get_serial_sequence() parses its table argument as SQL, so it gets the quoted name; the column
+        // argument is taken as written
+        $tableLiteral = $this->quoteStringLiteral($quotedTable);
         $columnLiteral = $this->quoteStringLiteral($columnName);
         $message = $this->quoteStringLiteral(
-            "Column \"$columnName\" of table \"$table\" is auto-increment, but no sequence is owned by it, "
+            "Column $quotedColumn of table $quotedTable is auto-increment, but no sequence is owned by it, "
             . 'so its sequence cannot change type with it. Make the sequence that feeds it owned by the column '
-            . "(ALTER SEQUENCE ... OWNED BY \"$table\".\"$columnName\"), then run the migration again.",
+            . "(ALTER SEQUENCE ... OWNED BY $quotedTable.$quotedColumn), then run the migration again.",
         );
 
-        return <<<SQL
-            DO \$\$
+        $body = <<<SQL
             DECLARE
                 sequence_name text := pg_get_serial_sequence($tableLiteral, $columnLiteral);
             BEGIN
@@ -591,8 +597,35 @@ class PgSqlGenerator implements SqlGeneratorInterface
                 $alterTable;
                 EXECUTE format('ALTER SEQUENCE %s AS $sequenceType', sequence_name);
             END
-            \$\$
             SQL;
+        $tag = $this->dollarQuoteTag($body);
+
+        return "DO $tag\n$body\n$tag";
+    }
+
+    /**
+     * A dollar-quote tag that does not occur in $body, so a table or column name holding `$$` (or the tag
+     * itself) cannot end the quoted block early: `$$` when that is safe, otherwise `$marko$`, `$marko_1$`, ...
+     */
+    private function dollarQuoteTag(
+        string $body,
+    ): string {
+        $tag = '$$';
+
+        for ($attempt = 0; str_contains($body, $tag); $attempt++) {
+            $tag = $attempt === 0 ? '$marko$' : '$marko_' . $attempt . '$';
+        }
+
+        return $tag;
+    }
+
+    /**
+     * Quote an identifier through the driver's one quoting rule, PgSqlIdentifier.
+     */
+    private function quote(
+        string $identifier,
+    ): string {
+        return PgSqlIdentifier::quote($identifier);
     }
 
     /**
