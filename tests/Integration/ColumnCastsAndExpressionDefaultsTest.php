@@ -478,7 +478,7 @@ describe('PostgreSQL expression defaults', function (): void {
 
         expect(fn () => ($this->diffAgainst)($entityTable))->toThrow(
             MigrationException::class,
-            "The database rejects the default expression \"now() + 'tomorrow'\" of column "
+            "The database rejected the default expression \"now() + 'tomorrow'\" of column "
             . "'cast_default_items.expires_at'",
         );
     });

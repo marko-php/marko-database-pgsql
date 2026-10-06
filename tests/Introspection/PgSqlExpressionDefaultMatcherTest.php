@@ -109,7 +109,7 @@ describe('PgSqlIntrospector expression default matching', function (): void {
                     ->matchesStoredDefault('events', 'expires_at', new Expression("now() + intervall '1 day'")),
             )->toThrow(
                 MigrationException::class,
-                "The database rejects the default expression \"now() + intervall '1 day'\" of column "
+                "The database rejected the default expression \"now() + intervall '1 day'\" of column "
                 . "'events.expires_at'",
             )->and($connection->log)->toContain('ROLLBACK')
                 ->and($connection->transactionLevel())->toBe(0);

@@ -6,6 +6,7 @@ namespace Marko\Database\PgSql\Introspection;
 
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\TransactionInterface;
+use Marko\Database\Exceptions\ExpressionDefaultProbeException;
 use Marko\Database\Exceptions\MigrationException;
 use Marko\Database\Exceptions\QueryException;
 use Marko\Database\Introspection\ExpressionDefaultMatcherInterface;
@@ -185,7 +186,7 @@ readonly class PgSqlIntrospector implements IntrospectorInterface, ExpressionDef
      * the real column's. Both are deparsed by pg_get_expr(), as information_schema.columns.column_default
      * reports them, so `now() + interval '1 day'` matches a stored `(now() + '1 day'::interval)`.
      *
-     * @throws MigrationException When PostgreSQL rejects the expression as a default for the column's type
+     * @throws ExpressionDefaultProbeException When PostgreSQL rejects the expression, or the user may not create a temporary table
      */
     public function matchesStoredDefault(
         string $table,
@@ -222,7 +223,7 @@ readonly class PgSqlIntrospector implements IntrospectorInterface, ExpressionDef
      * The probe table holding the expression whose stored form is compared, a temporary table that only the
      * current session sees.
      *
-     * @throws MigrationException When PostgreSQL rejects the expression
+     * @throws ExpressionDefaultProbeException When PostgreSQL rejects the probe table
      */
     private function createDefaultProbe(
         string $table,
@@ -241,7 +242,7 @@ readonly class PgSqlIntrospector implements IntrospectorInterface, ExpressionDef
         try {
             $this->connection->execute($sql);
         } catch (QueryException $e) {
-            throw MigrationException::rejectedDefaultExpression($table, $column, $expression->sql, $e->getMessage());
+            throw ExpressionDefaultProbeException::rejected($table, $column, $expression->sql, $e->getMessage());
         }
     }
 
