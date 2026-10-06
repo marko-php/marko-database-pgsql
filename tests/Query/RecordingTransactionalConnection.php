@@ -77,6 +77,11 @@ class RecordingTransactionalConnection implements ConnectionInterface, Transacti
         return 'pgsql';
     }
 
+    public function supportsReturning(): bool
+    {
+        return true;
+    }
+
     public function beginTransaction(): void
     {
         $this->open = true;

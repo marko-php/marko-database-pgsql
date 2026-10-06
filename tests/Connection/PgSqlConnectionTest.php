@@ -105,6 +105,13 @@ describe('PgSqlConnection', function (): void {
         expect($connection)->toBeInstanceOf(ConnectionInterface::class);
     });
 
+    it('reports that PostgreSQL connections support RETURNING', function (): void {
+        $connection = new PgSqlConnection(createTestPgSqlConfig());
+
+        expect($connection->supportsReturning())->toBeTrue()
+            ->and($connection->isConnected())->toBeFalse();
+    });
+
     it('constructs proper PostgreSQL DSN from config', function (): void {
         $config = createTestPgSqlConfig(
             host: 'db.example.com',

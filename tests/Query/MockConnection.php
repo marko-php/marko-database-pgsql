@@ -86,4 +86,9 @@ class MockConnection implements ConnectionInterface
     {
         return 'pgsql';
     }
+
+    public function supportsReturning(): bool
+    {
+        return true;
+    }
 }

@@ -1,0 +1,124 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Marko\Database\PgSql\Tests\Integration;
+
+use Marko\Database\Attributes\Column;
+use Marko\Database\Attributes\Table;
+use Marko\Database\Entity\Entity;
+use Marko\Database\Entity\EntityHydrator;
+use Marko\Database\Entity\EntityMetadataFactory;
+use Marko\Database\PgSql\Connection\PgSqlConnection;
+use Marko\Database\PgSql\Tests\Fixtures\IntegrationDatabase;
+use Marko\Database\Repository\Repository;
+
+/*
+ * Database-generated primary keys against a real PostgreSQL server. Set
+ * MARKO_TEST_PGSQL_HOST (and optionally MARKO_TEST_PGSQL_PORT, _DATABASE,
+ * _USERNAME, _PASSWORD) to enable; the tests skip otherwise. The tests create
+ * and drop the generated_key_tokens table.
+ *
+ * Settings come from tests/Fixtures/IntegrationDatabase. With
+ * MARKO_INTEGRATION_REQUIRED set (CI), a missing host fails instead of
+ * skipping. Part of the integration-services group.
+ */
+
+#[Table('generated_key_tokens')]
+class PgSqlGeneratedKeyToken extends Entity
+{
+    #[Column(primaryKey: true, type: 'uuid', default: 'gen_random_uuid()', generated: true)]
+    public string $id;
+
+    #[Column]
+    public string $label = '';
+}
+
+/**
+ * @extends Repository<PgSqlGeneratedKeyToken>
+ */
+class PgSqlGeneratedKeyTokenRepository extends Repository
+{
+    protected const string ENTITY_CLASS = PgSqlGeneratedKeyToken::class;
+}
+
+function pgsqlGeneratedKeyToken(
+    string $label,
+): PgSqlGeneratedKeyToken {
+    $token = new PgSqlGeneratedKeyToken();
+    $token->label = $label;
+
+    return $token;
+}
+
+pest()->group('integration-services');
+
+beforeEach(function (): void {
+    $config = IntegrationDatabase::config();
+
+    if ($config === null) {
+        $this->markTestSkipped(IntegrationDatabase::SKIP_REASON);
+    }
+
+    $this->connection = new PgSqlConnection($config);
+    $this->connection->execute('DROP TABLE IF EXISTS generated_key_tokens');
+    $this->connection->execute(
+        'CREATE TABLE generated_key_tokens (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), label VARCHAR(255) NOT NULL)',
+    );
+    $metadataFactory = new EntityMetadataFactory();
+    $this->repository = new PgSqlGeneratedKeyTokenRepository(
+        $this->connection,
+        $metadataFactory,
+        new EntityHydrator($metadataFactory),
+    );
+});
+
+afterEach(function (): void {
+    if (isset($this->connection)) {
+        $this->connection->execute('DROP TABLE IF EXISTS generated_key_tokens');
+        $this->connection->disconnect();
+    }
+});
+
+it('saves an entity with a database-generated uuid key and reads the key back', function (): void {
+    $token = pgsqlGeneratedKeyToken('api');
+
+    $this->repository->save($token);
+
+    expect($token->id)->toMatch('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/')
+        ->and($this->connection->query('SELECT id FROM generated_key_tokens'))->toBe([['id' => $token->id]]);
+});
+
+it('finds the saved entity by its generated key', function (): void {
+    $token = pgsqlGeneratedKeyToken('api');
+    $this->repository->save($token);
+
+    $found = $this->repository->find($token->id);
+
+    expect($found)->toBeInstanceOf(PgSqlGeneratedKeyToken::class)
+        ->and($found->id)->toBe($token->id)
+        ->and($found->label)->toBe('api');
+});
+
+it('updates the saved entity by its generated key on the next save', function (): void {
+    $token = pgsqlGeneratedKeyToken('api');
+    $this->repository->save($token);
+
+    $token->label = 'web';
+    $this->repository->save($token);
+
+    expect($this->connection->query('SELECT id, label FROM generated_key_tokens'))
+        ->toBe([['id' => $token->id, 'label' => 'web']]);
+});
+
+it('gives each batch-inserted entity its own generated key in insert order', function (): void {
+    $tokens = [pgsqlGeneratedKeyToken('first'), pgsqlGeneratedKeyToken('second'), pgsqlGeneratedKeyToken('third')];
+
+    $this->repository->insertBatch($tokens);
+
+    $ids = array_map(fn (PgSqlGeneratedKeyToken $token): string => $token->id, $tokens);
+
+    expect(array_unique($ids))->toHaveCount(3)
+        ->and(array_map(fn (string $id): string => $this->repository->find($id)->label, $ids))
+        ->toBe(['first', 'second', 'third']);
+});

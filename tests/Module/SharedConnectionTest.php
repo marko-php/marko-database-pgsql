@@ -117,6 +117,11 @@ describe('PostgreSQL shared connection wiring', function (): void {
             {
                 return 'pgsql';
             }
+
+            public function supportsReturning(): bool
+            {
+                return true;
+            }
         });
 
         expect(fn () => $container->get(TransactionInterface::class))

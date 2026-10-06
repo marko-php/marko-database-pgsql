@@ -259,6 +259,11 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
         return 'pgsql';
     }
 
+    public function supportsReturning(): bool
+    {
+        return true;
+    }
+
     /**
      * Open a transaction, or a savepoint named marko_sp_{depth} when one is
      * already open.
