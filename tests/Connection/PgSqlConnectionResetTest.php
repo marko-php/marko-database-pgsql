@@ -45,8 +45,8 @@ function makeResettablePgSqlConnection(int &$pdoCreations = 0): PgSqlConnection
             {
                 public function exec(string $statement): int|false
                 {
-                    // SQLite has no SET NAMES; ignore the encoding query.
-                    return str_starts_with($statement, 'SET NAMES') ? 0 : parent::exec($statement);
+                    // SQLite has no SET NAMES or SET TIME ZONE; ignore the session statements.
+                    return str_starts_with($statement, 'SET ') ? 0 : parent::exec($statement);
                 }
             };
             $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);

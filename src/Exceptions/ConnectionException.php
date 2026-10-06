@@ -27,6 +27,19 @@ class ConnectionException extends MarkoException
         );
     }
 
+    public static function unknownTimezone(
+        string $timezone,
+        PDOException $previous,
+    ): self {
+        return new self(
+            message: "PostgreSQL rejected the time zone '$timezone' that database.timezone pins the session to",
+            context: "While setting the session time zone on connect: {$previous->getMessage()}",
+            suggestion: "Set 'timezone' in config/database.php to a zone the server knows "
+                . '(SELECT name FROM pg_timezone_names), such as UTC or America/New_York',
+            previous: $previous,
+        );
+    }
+
     public static function invalidArrayBinding(
         int|string $parameter,
         JsonException $previous,

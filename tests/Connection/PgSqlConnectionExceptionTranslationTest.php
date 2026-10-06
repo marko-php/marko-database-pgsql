@@ -58,7 +58,7 @@ function sqliteBackedPgSqlConnection(
                 public function exec(
                     string $statement,
                 ): int|false {
-                    return str_starts_with($statement, 'SET NAMES') ? 0 : parent::exec($statement);
+                    return str_starts_with($statement, 'SET ') ? 0 : parent::exec($statement);
                 }
             };
             $pdo->exec('CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE)');
@@ -138,7 +138,7 @@ describe('PgSqlConnection exception translation', function (): void {
                     public function exec(
                         string $statement,
                     ): int|false {
-                        return str_starts_with($statement, 'SET NAMES') ? 0 : parent::exec($statement);
+                        return str_starts_with($statement, 'SET ') ? 0 : parent::exec($statement);
                     }
                 };
             }

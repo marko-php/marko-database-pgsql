@@ -53,15 +53,17 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
             return;
         }
 
+        // The PDO is kept only once the session is set up, so a failed setup leaves the connection
+        // disconnected and the next connect() tries again instead of running in the server's zone.
         try {
-            $this->pdo = $this->createPdo(
+            $pdo = $this->createPdo(
                 $this->buildDsn(),
                 $this->config->username,
                 $this->config->password,
                 $this->getPdoOptions(),
             );
 
-            $this->pdo->exec($this->getSetEncodingQuery());
+            $pdo->exec($this->getSetEncodingQuery());
         } catch (PDOException $e) {
             throw ConnectionException::connectionFailed(
                 $this->config->host,
@@ -70,6 +72,14 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
                 $e,
             );
         }
+
+        try {
+            $pdo->exec($this->getSetTimezoneQuery());
+        } catch (PDOException $e) {
+            throw ConnectionException::unknownTimezone($this->config->timezone->getName(), $e);
+        }
+
+        $this->pdo = $pdo;
     }
 
     /**
@@ -126,6 +136,22 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Pend
     private function getSetEncodingQuery(): string
     {
         return "SET NAMES '$this->charset'";
+    }
+
+    /**
+     * Pin the session to database.timezone. A fixed offset is sent as an ISO interval, because PostgreSQL
+     * reads a bare '+05:30' as a POSIX zone and inverts its sign. The zone was validated by DateTimeZone,
+     * so it holds no quote.
+     */
+    private function getSetTimezoneQuery(): string
+    {
+        $offset = $this->config->fixedTimezoneOffset();
+
+        return match (true) {
+            $offset === '+00:00' => "SET TIME ZONE 'UTC'",
+            $offset !== null => "SET TIME ZONE INTERVAL '$offset' HOUR TO MINUTE",
+            default => "SET TIME ZONE '{$this->config->timezone->getName()}'",
+        };
     }
 
     /**

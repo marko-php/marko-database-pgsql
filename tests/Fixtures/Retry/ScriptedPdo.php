@@ -43,8 +43,8 @@ class ScriptedPdo extends PDO
     public function exec(
         string $statement,
     ): int|false {
-        // SQLite has no SET NAMES; ignore the encoding query.
-        if (str_starts_with($statement, 'SET NAMES')) {
+        // SQLite has no SET NAMES or SET TIME ZONE; ignore the session statements.
+        if (str_starts_with($statement, 'SET ')) {
             return 0;
         }
 
