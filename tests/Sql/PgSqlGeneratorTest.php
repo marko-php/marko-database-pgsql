@@ -670,6 +670,25 @@ describe('PgSqlGenerator', function (): void {
         ]);
     });
 
+    it('ignores native metadata on the previous column', function (): void {
+        $diff = pgsqlModifyDiff(
+            new Column(name: 'price', type: 'decimal', nullable: true),
+            new Column(
+                name: 'price',
+                type: 'decimal',
+                nativeType: 'numeric(12,4)',
+                collation: 'C',
+                onUpdateExpression: 'CURRENT_TIMESTAMP',
+            ),
+        );
+
+        expect($this->generator->generateUp($diff))->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "price" DROP NOT NULL',
+        ])->and($this->generator->generateDown($diff))->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "price" SET NOT NULL',
+        ]);
+    });
+
     it('throws a MigrationException naming the column when columnsToModifyFrom is missing it', function (): void {
         $diff = new SchemaDiff(tablesToAlter: [
             'posts' => new TableDiff(

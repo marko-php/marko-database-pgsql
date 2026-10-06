@@ -445,7 +445,8 @@ class PgSqlGenerator implements SqlGeneratorInterface
 
         foreach ($diff->columnsToModify as $columnName => $column) {
             $previous = $diff->previousColumn($columnName);
-            $target = $this->targetColumn($column, $previous);
+            // The diff's tolerances (an undeclared length or default keeps the database's) live in Column
+            $target = $column->resolveAgainst($previous);
 
             $statement = $reverse
                 ? $this->generateModifyColumnIfChanged($diff->tableName, $previous, $target)
@@ -457,30 +458,6 @@ class PgSqlGenerator implements SqlGeneratorInterface
         }
 
         return $statements;
-    }
-
-    /**
-     * The column an up migration actually moves to: the entity column, with the same tolerances the
-     * diff applies (Column::equals()). An entity that declares no length or no default keeps the
-     * database's, and an auto-increment primary key keeps its nullability whatever the PHP property allows.
-     */
-    private function targetColumn(
-        Column $column,
-        Column $previous,
-    ): Column {
-        return new Column(
-            name: $column->name,
-            type: $column->type,
-            length: $column->length ?? $previous->length,
-            nullable: $column->primaryKey && $column->autoIncrement ? $previous->nullable : $column->nullable,
-            default: $column->default ?? $previous->default,
-            unique: $column->unique,
-            primaryKey: $column->primaryKey,
-            autoIncrement: $column->autoIncrement,
-            references: $column->references,
-            onDelete: $column->onDelete,
-            onUpdate: $column->onUpdate,
-        );
     }
 
     /**
