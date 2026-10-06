@@ -715,6 +715,21 @@ describe('PgSqlConnection', function (): void {
         expect($connection->getDsn())->toBe('pgsql:host=db.example.com;port=5432;dbname=myapp;sslmode=require');
     });
 
+    it('passes sslmode verify-full and the CA through to the DSN', function (): void {
+        $config = createTestPgSqlConfig(
+            host: 'db.example.com',
+            port: 5432,
+            database: 'myapp',
+            sslmode: 'verify-full',
+            sslCa: '/path/to/ca.pem',
+        );
+        $connection = new PgSqlConnection($config);
+
+        expect($connection->getDsn())->toBe(
+            'pgsql:host=db.example.com;port=5432;dbname=myapp;sslmode=verify-full;sslrootcert=/path/to/ca.pem',
+        );
+    });
+
     it('omits sslmode from DSN when not configured', function (): void {
         $config = createTestPgSqlConfig(
             host: 'db.example.com',
