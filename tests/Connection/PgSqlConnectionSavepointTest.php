@@ -6,6 +6,7 @@ namespace Marko\Database\PgSql\Tests\Connection;
 
 use ArrayObject;
 use Marko\Database\Config\DatabaseConfig;
+use Marko\Database\Connection\PendingAfterCommitInterface;
 use Marko\Database\Exceptions\TransactionException;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use PDO;
@@ -333,5 +334,23 @@ describe('PgSqlConnection savepoints', function (): void {
         expect($connection->transactionLevel())->toBe(0)
             ->and($connection->inTransaction())->toBeFalse()
             ->and($ran)->toBeFalse();
+    });
+
+    it('runs pending after-commit callbacks without committing', function (): void {
+        $connection = makeSavepointPgSqlConnection();
+        $log = [];
+
+        $connection->beginTransaction();
+        $connection->beginTransaction();
+        $connection->afterCommit(function () use (&$log): void {
+            $log[] = 'ran';
+        });
+        $connection->runPendingAfterCommitCallbacks();
+        $connection->commit();
+        $connection->rollback();
+
+        expect($log)->toBe(['ran'])
+            ->and($connection)->toBeInstanceOf(PendingAfterCommitInterface::class)
+            ->and($connection->transactionLevel())->toBe(0);
     });
 });

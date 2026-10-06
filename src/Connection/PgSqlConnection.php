@@ -8,6 +8,7 @@ use JsonException;
 use Marko\Core\Contracts\ResettableInterface;
 use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\Connection\PendingAfterCommitInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\Connection\TransactionState;
@@ -20,7 +21,7 @@ use PDOException;
 use PDOStatement;
 use Throwable;
 
-class PgSqlConnection implements ConnectionInterface, TransactionInterface, ResettableInterface
+class PgSqlConnection implements ConnectionInterface, TransactionInterface, PendingAfterCommitInterface, ResettableInterface
 {
     private ?PDO $pdo = null;
 
@@ -395,6 +396,11 @@ class PgSqlConnection implements ConnectionInterface, TransactionInterface, Rese
         callable $callback,
     ): void {
         $this->transactionState->afterRollback($callback);
+    }
+
+    public function runPendingAfterCommitCallbacks(): void
+    {
+        $this->transactionState->runAfterCommitCallbacks();
     }
 
     /**
