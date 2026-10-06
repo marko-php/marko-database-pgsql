@@ -4,9 +4,15 @@ declare(strict_types=1);
 
 namespace Marko\Database\PgSql\Tests\Sql;
 
+use Marko\Database\Attributes\Column as ColumnAttribute;
+use Marko\Database\Attributes\Table as TableAttribute;
+use Marko\Database\Diff\DiffCalculator;
 use Marko\Database\Diff\SchemaDiff;
 use Marko\Database\Diff\SqlGeneratorInterface;
 use Marko\Database\Diff\TableDiff;
+use Marko\Database\Entity\Entity;
+use Marko\Database\Entity\EntityMetadataFactory;
+use Marko\Database\Entity\SchemaBuilder;
 use Marko\Database\Exceptions\MigrationException;
 use Marko\Database\PgSql\Sql\PgSqlGenerator;
 use Marko\Database\Schema\Column;
@@ -1070,3 +1076,55 @@ describe('PgSqlGenerator auto-increment sequence type changes', function (): voi
             ->and($statement)->toContain('Column "o\'\'id" of table "o\'\'brien"');
     });
 });
+
+describe('PgSqlGenerator derived names over 63 bytes', function (): void {
+    beforeEach(function (): void {
+        $this->statements = new PgSqlGenerator()->generateUp(pgsqlLongNameDiff());
+    });
+
+    it('creates the unique index of a long table and column under its shortened name', function (): void {
+        $statement = array_find(
+            $this->statements,
+            fn (string $sql): bool => str_starts_with($sql, 'CREATE UNIQUE INDEX'),
+        );
+
+        expect($statement)->toContain('customer_subscription_event_ledger_external_bil_4456c35c_unique');
+    });
+
+    it('adds a long foreign key under its shortened name', function (): void {
+        $statement = array_find($this->statements, fn (string $sql): bool => str_contains($sql, 'ADD CONSTRAINT'));
+
+        expect($statement)->toContain('fk_customer_subscription_event_ledger_external_billing_f7ee0a8b');
+    });
+});
+
+/**
+ * The diff that makes an existing column of a long-named table unique and a foreign key, so both derived names are
+ * over 63 bytes before shortening.
+ */
+function pgsqlLongNameDiff(): SchemaDiff
+{
+    $entityTable = new SchemaBuilder()->build(new EntityMetadataFactory()->parse(
+        (new #[TableAttribute('customer_subscription_event_ledger')]
+        class () extends Entity
+        {
+            #[ColumnAttribute(primaryKey: true, autoIncrement: true)]
+            public int $id;
+
+            #[ColumnAttribute(unique: true, references: 'billing_accounts.id')]
+            public int $externalBillingReferenceId;
+        })::class,
+    ));
+    $databaseTable = new Table(
+        name: 'customer_subscription_event_ledger',
+        columns: [
+            new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
+            new Column(name: 'external_billing_reference_id', type: 'integer'),
+        ],
+    );
+
+    return new DiffCalculator()->calculate(
+        [$entityTable->name => $entityTable],
+        [$databaseTable->name => $databaseTable],
+    );
+}
