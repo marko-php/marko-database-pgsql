@@ -11,9 +11,11 @@ use Marko\Database\Introspection\IntrospectorInterface;
 use Marko\Database\PgSql\Introspection\PgSqlIntrospector;
 use Marko\Database\PgSql\Sql\PgSqlGenerator;
 use Marko\Database\Schema\Column;
+use Marko\Database\Schema\Expression;
 use Marko\Database\Schema\ForeignKey;
 use Marko\Database\Schema\Index;
 use Marko\Database\Schema\IndexType;
+use Marko\Database\Schema\Literal;
 use Marko\Database\Schema\Table;
 use ReflectionClass;
 use RuntimeException;
@@ -246,13 +248,49 @@ describe('PgSqlIntrospector', function (): void {
 
         expect($columns[0]->default)->toBe('active')
             ->and($columns[1]->default)->toBe(0)
-            ->and($columns[2]->default)->toBe('CURRENT_TIMESTAMP')
+            ->and($columns[2]->default)->toEqual(new Expression('CURRENT_TIMESTAMP'))
             // Sequence defaults should be treated as auto_increment, not as regular defaults
             ->and($columns[3]->autoIncrement)->toBeTrue()
             ->and($columns[3]->default)->toBeNull()
             ->and($columns[4]->default)->toBeTrue()
             ->and($columns[5]->default)->toBeFalse()
             ->and($columns[6]->default)->toBe(10.50);
+    });
+
+    it('reads a function default as an expression', function (): void {
+        $columns = pgsqlColumnsWithDefaults(['gen_random_uuid()'], 'uuid');
+
+        expect($columns[0]->default)->toEqual(new Expression('gen_random_uuid()'));
+    });
+
+    it('reads CURRENT_TIMESTAMP as an expression', function (): void {
+        $columns = pgsqlColumnsWithDefaults(
+            ['CURRENT_TIMESTAMP', "(now() + '1 day'::interval)"],
+            'timestamp without time zone',
+        );
+
+        expect($columns[0]->default)->toEqual(new Expression('CURRENT_TIMESTAMP'))
+            ->and($columns[1]->default)->toEqual(new Expression("(now() + '1 day'::interval)"));
+    });
+
+    it('reads a quoted literal that looks like a function as a literal', function (): void {
+        $columns = pgsqlColumnsWithDefaults(["'now()'::character varying", "'draft'::character varying"]);
+
+        expect($columns[0]->default)->toEqual(new Literal('now()'))
+            ->and($columns[1]->default)->toBe('draft');
+    });
+
+    it('unescapes doubled quotes in a string literal default', function (): void {
+        $columns = pgsqlColumnsWithDefaults(["'it''s'::character varying", "('a'::text || 'b'::text)"]);
+
+        expect($columns[0]->default)->toBe("it's")
+            ->and($columns[1]->default)->toEqual(new Expression("('a'::text || 'b'::text)"));
+    });
+
+    it('reads an explicit NULL default as no default', function (): void {
+        $columns = pgsqlColumnsWithDefaults(['NULL::character varying']);
+
+        expect($columns[0]->default)->toBeNull();
     });
 
     it('detects serial/identity columns', function (): void {
@@ -774,4 +812,37 @@ function createTestConnection(
             return 'pgsql';
         }
     };
+}
+
+/**
+ * The columns of a table whose columns have the given defaults, as information_schema reports them.
+ *
+ * @param list<string> $defaults
+ * @return array<Column>
+ */
+function pgsqlColumnsWithDefaults(
+    array $defaults,
+    string $dataType = 'character varying',
+): array {
+    $connection = createTestConnection(function (string $sql) use ($defaults, $dataType): array {
+        if (!str_contains($sql, 'information_schema.columns')) {
+            return [];
+        }
+
+        return array_map(
+            static fn (string $default, int $index): array => [
+                'column_name' => "col_$index",
+                'data_type' => $dataType,
+                'character_maximum_length' => null,
+                'is_nullable' => 'NO',
+                'column_default' => $default,
+                'is_identity' => 'NO',
+                'identity_generation' => null,
+            ],
+            $defaults,
+            array_keys($defaults),
+        );
+    });
+
+    return new PgSqlIntrospector($connection)->getColumns('posts');
 }

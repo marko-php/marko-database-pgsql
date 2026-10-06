@@ -5,11 +5,14 @@ declare(strict_types=1);
 namespace Marko\Database\PgSql\Introspection;
 
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\Exceptions\MigrationException;
 use Marko\Database\Introspection\IntrospectorInterface;
 use Marko\Database\Schema\Column;
+use Marko\Database\Schema\Expression;
 use Marko\Database\Schema\ForeignKey;
 use Marko\Database\Schema\Index;
 use Marko\Database\Schema\IndexType;
+use Marko\Database\Schema\Literal;
 use Marko\Database\Schema\Table;
 
 readonly class PgSqlIntrospector implements IntrospectorInterface
@@ -366,20 +369,34 @@ readonly class PgSqlIntrospector implements IntrospectorInterface
         return str_contains($default, 'nextval(') && str_contains($default, '_seq');
     }
 
+    /**
+     * The default the column declares: a string, bool, int or float for a literal, an Expression for anything
+     * else (`gen_random_uuid()`, `CURRENT_TIMESTAMP`), and a Literal for a string that would otherwise read as
+     * an expression shortcut, so a down migration restores it quoted.
+     *
+     * @throws MigrationException Only for an empty expression, which is returned as null before that
+     */
     private function parseDefault(
         ?string $default,
         string $type,
     ): mixed {
-        if ($default === null) {
+        if ($default === null || trim($default) === '') {
             return null;
         }
 
         // Remove type cast suffix like ::character varying, ::integer, etc.
-        $default = preg_replace('/::[\w\s]+$/', '', $default);
+        $default = (string) preg_replace('/::[\w\s]+$/', '', $default);
 
-        // Handle string defaults (wrapped in quotes)
-        if (preg_match("/^'(.*)'/", $default, $matches)) {
-            return $matches[1];
+        // An explicit DEFAULT NULL is no default
+        if (strtoupper($default) === 'NULL') {
+            return null;
+        }
+
+        // A string literal is the whole default between single quotes, with quotes inside it doubled
+        if (preg_match("/^'((?:[^']|'')*)'$/", $default, $matches)) {
+            $value = str_replace("''", "'", $matches[1]);
+
+            return Expression::isShortcut($value) ? new Literal($value) : $value;
         }
 
         // Handle boolean defaults
@@ -405,8 +422,8 @@ readonly class PgSqlIntrospector implements IntrospectorInterface
             }
         }
 
-        // Return as-is for expressions like CURRENT_TIMESTAMP, NOW(), etc.
-        return $default;
+        // Everything else is an expression, such as CURRENT_TIMESTAMP or gen_random_uuid()
+        return new Expression($default);
     }
 
     /**

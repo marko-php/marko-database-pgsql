@@ -9,9 +9,11 @@ use Marko\Database\Diff\SqlGeneratorInterface;
 use Marko\Database\Diff\TableDiff;
 use Marko\Database\Exceptions\MigrationException;
 use Marko\Database\Schema\Column;
+use Marko\Database\Schema\Expression;
 use Marko\Database\Schema\ForeignKey;
 use Marko\Database\Schema\Index;
 use Marko\Database\Schema\IndexType;
+use Marko\Database\Schema\Literal;
 use Marko\Database\Schema\Table;
 
 /**
@@ -51,18 +53,6 @@ class PgSqlGenerator implements SqlGeneratorInterface
         'binary' => 'BYTEA',
         'blob' => 'BYTEA',
         'enum' => 'VARCHAR',
-    ];
-
-    /**
-     * Default values that are SQL expressions rather than string literals (matched case-insensitively).
-     *
-     * @var list<string>
-     */
-    private const array SQL_EXPRESSIONS = [
-        'CURRENT_TIMESTAMP',
-        'CURRENT_DATE',
-        'CURRENT_TIME',
-        'NOW()',
     ];
 
     public function generateUp(
@@ -295,11 +285,20 @@ class PgSqlGenerator implements SqlGeneratorInterface
     }
 
     /**
-     * Format a default value for SQL.
+     * Format a default value for SQL: an Expression (or a shortcut string such as `gen_random_uuid()`) as
+     * written, a Literal or any other string quoted.
      */
     private function formatDefaultValue(
         mixed $value,
     ): string {
+        if ($value instanceof Expression) {
+            return $value->sql;
+        }
+
+        if ($value instanceof Literal) {
+            return $this->quoteString($value->value);
+        }
+
         if (is_bool($value)) {
             return $value ? 'TRUE' : 'FALSE';
         }
@@ -309,18 +308,16 @@ class PgSqlGenerator implements SqlGeneratorInterface
         }
 
         if (is_string($value)) {
-            // SQL expressions (also what introspection reads back) are emitted as-is
-            if (in_array(strtoupper($value), self::SQL_EXPRESSIONS, true)) {
-                return $value;
-            }
-
-            // Escape single quotes
-            $escaped = str_replace("'", "''", $value);
-
-            return "'$escaped'";
+            return Expression::isShortcut($value) ? $value : $this->quoteString($value);
         }
 
         return 'NULL';
+    }
+
+    private function quoteString(
+        string $value,
+    ): string {
+        return "'" . str_replace("'", "''", $value) . "'";
     }
 
     /**
@@ -482,9 +479,23 @@ class PgSqlGenerator implements SqlGeneratorInterface
         $alterations = [];
 
         $newType = $this->mapType($column);
+        $typeChanges = $newType !== $this->mapType($oldColumn);
 
-        if ($newType !== $this->mapType($oldColumn)) {
-            $alterations[] = "ALTER COLUMN \"$column->name\" TYPE $newType";
+        // An auto-increment column's default is its sequence, which is never altered here
+        $manageDefault = !$column->autoIncrement;
+
+        // The old default goes before the type changes, so one that cannot be cast to the new type never
+        // blocks the migration; the target default is set again after it
+        $dropsDefaultForType = $typeChanges && $manageDefault && $oldColumn->default !== null;
+
+        if ($dropsDefaultForType) {
+            $alterations[] = "ALTER COLUMN \"$column->name\" DROP DEFAULT";
+        }
+
+        if ($typeChanges) {
+            // An explicit cast: PostgreSQL applies only an assignment cast without USING, which refuses
+            // conversions such as varchar to integer
+            $alterations[] = "ALTER COLUMN \"$column->name\" TYPE $newType USING \"$column->name\"::$newType";
         }
 
         // A primary key column is always NOT NULL, whatever the PHP property allows
@@ -493,8 +504,12 @@ class PgSqlGenerator implements SqlGeneratorInterface
             $alterations[] = "ALTER COLUMN \"$column->name\" $nullability";
         }
 
-        // An auto-increment column's default is its sequence, which is never altered here
-        if ($column->default !== $oldColumn->default && !$column->autoIncrement) {
+        if ($dropsDefaultForType) {
+            if ($column->default !== null) {
+                $alterations[] = "ALTER COLUMN \"$column->name\" SET DEFAULT "
+                    . $this->formatDefaultValue($column->default);
+            }
+        } elseif ($manageDefault && !$column->hasSameDefaultAs($oldColumn)) {
             $alterations[] = $column->default === null
                 ? "ALTER COLUMN \"$column->name\" DROP DEFAULT"
                 : "ALTER COLUMN \"$column->name\" SET DEFAULT " . $this->formatDefaultValue($column->default);

@@ -10,9 +10,11 @@ use Marko\Database\Diff\TableDiff;
 use Marko\Database\Exceptions\MigrationException;
 use Marko\Database\PgSql\Sql\PgSqlGenerator;
 use Marko\Database\Schema\Column;
+use Marko\Database\Schema\Expression;
 use Marko\Database\Schema\ForeignKey;
 use Marko\Database\Schema\Index;
 use Marko\Database\Schema\IndexType;
+use Marko\Database\Schema\Literal;
 use Marko\Database\Schema\Table;
 
 describe('PgSqlGenerator', function (): void {
@@ -528,7 +530,7 @@ describe('PgSqlGenerator', function (): void {
             new Column(name: 'id', type: 'integer', primaryKey: true, autoIncrement: true),
         ));
 
-        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT']);
+        expect($statements)->toBe(['ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT USING "id"::BIGINT']);
     });
 
     it('drops the default in a down migration when the old column had none', function (): void {
@@ -585,7 +587,7 @@ describe('PgSqlGenerator', function (): void {
         ]);
 
         expect($this->generator->generateDown($diff))->toBe([
-            'ALTER TABLE "posts" ALTER COLUMN "author_id" TYPE INTEGER',
+            'ALTER TABLE "posts" ALTER COLUMN "author_id" TYPE INTEGER USING "author_id"::INTEGER',
             'ALTER TABLE "posts" ADD CONSTRAINT "posts_author_id_foreign" FOREIGN KEY ("author_id") '
             . 'REFERENCES "users" ("id")',
         ]);
@@ -616,7 +618,8 @@ describe('PgSqlGenerator', function (): void {
         ));
 
         expect($statements)->toBe([
-            'ALTER TABLE "posts" ALTER COLUMN "views" TYPE BIGINT, ALTER COLUMN "views" SET DEFAULT 0',
+            'ALTER TABLE "posts" ALTER COLUMN "views" TYPE BIGINT USING "views"::BIGINT, '
+            . 'ALTER COLUMN "views" SET DEFAULT 0',
         ]);
     });
 
@@ -665,7 +668,8 @@ describe('PgSqlGenerator', function (): void {
         ));
 
         expect($statements)->toBe([
-            'ALTER TABLE "posts" ALTER COLUMN "views" TYPE INTEGER, ALTER COLUMN "views" SET NOT NULL, '
+            'ALTER TABLE "posts" ALTER COLUMN "views" DROP DEFAULT, '
+            . 'ALTER COLUMN "views" TYPE INTEGER USING "views"::INTEGER, ALTER COLUMN "views" SET NOT NULL, '
             . 'ALTER COLUMN "views" SET DEFAULT 0',
         ]);
     });
@@ -686,6 +690,146 @@ describe('PgSqlGenerator', function (): void {
             'ALTER TABLE "posts" ALTER COLUMN "price" DROP NOT NULL',
         ])->and($this->generator->generateDown($diff))->toBe([
             'ALTER TABLE "posts" ALTER COLUMN "price" SET NOT NULL',
+        ]);
+    });
+
+    it('emits an unquoted gen_random_uuid() default', function (): void {
+        $sql = $this->generator->generateCreateTable(new Table(
+            name: 'articles',
+            columns: [new Column(name: 'id', type: 'uuid', primaryKey: true, default: 'gen_random_uuid()')],
+        ));
+
+        expect($sql)->toContain('"id" UUID DEFAULT gen_random_uuid() PRIMARY KEY');
+    });
+
+    it('emits an explicit expression default raw', function (): void {
+        $sql = $this->generator->generateAddColumn(
+            'posts',
+            new Column(name: 'expires_at', type: 'timestamp', default: new Expression("now() + interval '1 day'")),
+        );
+
+        expect($sql)->toBe(
+            'ALTER TABLE "posts" ADD COLUMN "expires_at" TIMESTAMP NOT NULL DEFAULT now() + interval \'1 day\'',
+        );
+    });
+
+    it('quotes a literal default that looks like a function', function (): void {
+        $sql = $this->generator->generateAddColumn(
+            'posts',
+            new Column(name: 'label', type: 'string', default: new Literal("it's now()")),
+        );
+
+        expect($sql)->toBe('ALTER TABLE "posts" ADD COLUMN "label" VARCHAR(255) NOT NULL DEFAULT \'it\'\'s now()\'');
+    });
+
+    it('keeps an existing CURRENT_TIMESTAMP default unquoted', function (): void {
+        $sql = $this->generator->generateAddColumn(
+            'posts',
+            new Column(name: 'created_at', type: 'timestamp', default: 'CURRENT_TIMESTAMP(6)'),
+        );
+
+        expect($sql)->toBe(
+            'ALTER TABLE "posts" ADD COLUMN "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(6)',
+        );
+    });
+
+    it('casts with USING when changing varchar to integer', function (): void {
+        $statements = $this->generator->generateUp(pgsqlModifyDiff(
+            new Column(name: 'quantity', type: 'integer'),
+            new Column(name: 'quantity', type: 'varchar', length: 20),
+        ));
+
+        expect($statements)->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "quantity" TYPE INTEGER USING "quantity"::INTEGER',
+        ]);
+    });
+
+    it('casts with USING when changing integer to varchar in the down migration', function (): void {
+        $diff = pgsqlModifyDiff(
+            new Column(name: 'quantity', type: 'integer'),
+            new Column(name: 'quantity', type: 'varchar', length: 20),
+        );
+
+        expect($this->generator->generateDown($diff))->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "quantity" TYPE VARCHAR(20) USING "quantity"::VARCHAR(20)',
+        ]);
+    });
+
+    it('drops and restores the default around a type change', function (): void {
+        $diff = pgsqlModifyDiff(
+            new Column(name: 'quantity', type: 'integer', default: 0),
+            new Column(name: 'quantity', type: 'varchar', length: 20, default: '0'),
+        );
+
+        expect($this->generator->generateUp($diff))->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "quantity" DROP DEFAULT, '
+            . 'ALTER COLUMN "quantity" TYPE INTEGER USING "quantity"::INTEGER, '
+            . 'ALTER COLUMN "quantity" SET DEFAULT 0',
+        ])->and($this->generator->generateDown($diff))->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "quantity" DROP DEFAULT, '
+            . 'ALTER COLUMN "quantity" TYPE VARCHAR(20) USING "quantity"::VARCHAR(20), '
+            . 'ALTER COLUMN "quantity" SET DEFAULT \'0\'',
+        ]);
+    });
+
+    it('only drops the default around a type change when the target column has no default', function (): void {
+        $sql = $this->generator->generateModifyColumn(
+            'posts',
+            new Column(name: 'quantity', type: 'integer'),
+            new Column(name: 'quantity', type: 'varchar', length: 20, default: '0'),
+        );
+
+        expect($sql)->toBe(
+            'ALTER TABLE "posts" ALTER COLUMN "quantity" DROP DEFAULT, '
+            . 'ALTER COLUMN "quantity" TYPE INTEGER USING "quantity"::INTEGER',
+        );
+    });
+
+    it('emits DROP DEFAULT, TYPE ... USING and SET DEFAULT in that order within one ALTER TABLE', function (): void {
+        $sql = $this->generator->generateModifyColumn(
+            'posts',
+            new Column(name: 'ref', type: 'uuid', nullable: true, default: new Expression('gen_random_uuid()')),
+            new Column(name: 'ref', type: 'varchar', length: 36, default: 'none'),
+        );
+
+        expect($sql)->toBe(
+            'ALTER TABLE "posts" ALTER COLUMN "ref" DROP DEFAULT, '
+            . 'ALTER COLUMN "ref" TYPE UUID USING "ref"::UUID, '
+            . 'ALTER COLUMN "ref" DROP NOT NULL, '
+            . 'ALTER COLUMN "ref" SET DEFAULT gen_random_uuid()',
+        );
+    });
+
+    it(
+        'does not drop or restore the sequence default when changing the type of an auto-increment column',
+        function (): void {
+            $diff = pgsqlModifyDiff(
+                new Column(name: 'id', type: 'bigint', primaryKey: true, autoIncrement: true),
+                new Column(
+                    name: 'id',
+                    type: 'integer',
+                    primaryKey: true,
+                    autoIncrement: true,
+                    default: new Expression("nextval('posts_id_seq'::regclass)"),
+                ),
+            );
+
+            expect($this->generator->generateUp($diff))->toBe([
+                'ALTER TABLE "posts" ALTER COLUMN "id" TYPE BIGINT USING "id"::BIGINT',
+            ])->and($this->generator->generateDown($diff))->toBe([
+                'ALTER TABLE "posts" ALTER COLUMN "id" TYPE INTEGER USING "id"::INTEGER',
+            ]);
+        },
+    );
+
+    it('does not alter the default when only the default\'s representation differs', function (): void {
+        $diff = pgsqlModifyDiff(
+            new Column(name: 'created_at', type: 'timestamp', nullable: true, default: 'NOW()'),
+            new Column(name: 'created_at', type: 'timestamp', default: new Expression('now()')),
+        );
+
+        expect($this->generator->generateUp($diff))->toBe([
+            'ALTER TABLE "posts" ALTER COLUMN "created_at" DROP NOT NULL',
         ]);
     });
 
